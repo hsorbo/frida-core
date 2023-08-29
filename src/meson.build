@@ -479,6 +479,7 @@ endif
 if have_fruity_backend
   backend_sources += [
     'fruity' / 'fruity-host-session.vala',
+    'fruity' / 'xpc.vala',
     'fruity' / 'dtx.vala',
     'fruity' / 'lockdown.vala',
     'fruity' / 'installation-proxy.vala',
@@ -498,6 +499,17 @@ if have_fruity_backend
     backend_sources += 'fruity' / 'fruity-host-session-unix.c'
   endif
 endif
+
+executable('xpc-test',
+  'fruity/xpc.vala',
+  'fruity/usbmux.vala',
+  'fruity/plist.vala',
+  vala_args: [
+    '--pkg=posix',
+    '--define=TEST',
+  ],
+  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep],
+)
 
 if have_droidy_backend
   backend_sources += [

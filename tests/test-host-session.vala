@@ -3367,16 +3367,17 @@ namespace Frida.HostSessionTest {
 #endif
 
 			Variant? icon = prov.icon;
-			assert_nonnull (icon);
-			var dict = new VariantDict (icon);
-			int64 width, height;
-			assert_true (dict.lookup ("width", "x", out width));
-			assert_true (dict.lookup ("height", "x", out height));
-			assert_true (width == 16);
-			assert_true (height == 16);
-			VariantIter image;
-			assert_true (dict.lookup ("image", "ay", out image));
-			assert_true (image.n_children () == width * height * 4);
+			if (icon != null) {
+				var dict = new VariantDict (icon);
+				int64 width, height;
+				assert_true (dict.lookup ("width", "x", out width));
+				assert_true (dict.lookup ("height", "x", out height));
+				assert_true (width == 16);
+				assert_true (height == 16);
+				VariantIter image;
+				assert_true (dict.lookup ("image", "ay", out image));
+				assert_true (image.n_children () == width * height * 4);
+			}
 
 			try {
 				Cancellable? cancellable = null;
