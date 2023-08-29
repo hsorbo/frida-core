@@ -476,6 +476,7 @@ socket_sources = [
 
 fruity_sources = [
   'fruity/fruity-host-session.vala',
+  'fruity/xpc.vala',
   'fruity/dtx.vala',
   'fruity/lockdown.vala',
   'fruity/installation-proxy.vala',
@@ -494,6 +495,17 @@ elif host_os_family == 'darwin'
 else
   fruity_sources += ['fruity/fruity-host-session-unix.c']
 endif
+
+executable('xpc-test',
+  'fruity/xpc.vala',
+  'fruity/usbmux.vala',
+  'fruity/plist.vala',
+  vala_args: [
+    '--pkg=posix',
+    '--define=TEST',
+  ],
+  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep],
+)
 
 droidy_sources = [
   'droidy/droidy-host-session.vala',
