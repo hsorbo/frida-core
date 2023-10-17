@@ -510,7 +510,10 @@ executable('xpc-test',
     '--define=TEST',
   ],
   dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep],
-  link_args: ['-Wl,-framework,Foundation'],
+  link_args: [
+    '-Wl,-framework,Foundation',
+    '-Wl,-framework,Network',
+  ],
 )
 
 if have_droidy_backend
