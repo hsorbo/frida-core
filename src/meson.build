@@ -477,6 +477,7 @@ socket_sources = [
 fruity_sources = [
   'fruity/fruity-host-session.vala',
   'fruity/xpc.vala',
+  'fruity/xpc-glue.m',
   'fruity/dtx.vala',
   'fruity/lockdown.vala',
   'fruity/installation-proxy.vala',
@@ -498,6 +499,7 @@ endif
 
 executable('xpc-test',
   'fruity/xpc.vala',
+  'fruity/xpc-glue.m',
   'fruity/usbmux.vala',
   'fruity/plist.vala',
   vala_args: [
@@ -505,6 +507,7 @@ executable('xpc-test',
     '--define=TEST',
   ],
   dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep],
+  link_args: ['-Wl,-framework,Foundation'],
 )
 
 droidy_sources = [

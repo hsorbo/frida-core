@@ -1,6 +1,9 @@
 [CCode (gir_namespace = "FridaXPC", gir_version = "1.0")]
 namespace Frida.XPC {
+	public extern static void _get_endpoint_for_device (string uuid);
+
 #if TEST
+	/*
 	private async void test_xpc () {
 		Cancellable? cancellable = null;
 
@@ -29,11 +32,15 @@ namespace Frida.XPC {
 			Process.exit (1);
 		}
 	}
+	*/
 
 	private int main (string[] args) {
+		_get_endpoint_for_device ("xxx");
+		/*
 		var loop = new MainLoop ();
 		test_xpc.begin ();
 		loop.run ();
+		*/
 		return 0;
 	}
 #endif
