@@ -27,9 +27,11 @@ _frida_xpc_get_endpoint_for_device (const gchar * uuid)
 
         nw_endpoint_t ep = nw_browse_result_copy_endpoint (new_result);
         NSLog (@"endpoint: %@", ep);
+        nw_release (ep);
 
         nw_txt_record_t txt = nw_browse_result_copy_txt_record_object (new_result);
         NSLog (@"txt: %@", txt);
+        nw_release (txt);
 
         NSLog (@">>>");
         nw_browse_result_enumerate_interfaces (new_result, ^bool (nw_interface_t iface)
@@ -38,10 +40,20 @@ _frida_xpc_get_endpoint_for_device (const gchar * uuid)
               return true;
             });
         NSLog (@"<<<\n");
+
+        nw_connection_t conn = nw_connection_create (ep, params);
+        NSLog (@"Created connection %@", conn);
+        nw_connection_set_queue (conn, queue);
+        nw_connection_set_state_changed_handler (conn, ^(nw_connection_state_t state, nw_error_t error)
+            {
+              NSLog (@"[connection %p] state=%u", conn, state);
+            });
+        nw_connection_start (conn);
+
       });
   nw_browser_start (browser);
 
-  nw_release (params);
+  //nw_release (params);
   nw_release (desc);
 
   g_usleep (5 * G_USEC_PER_SEC);
