@@ -480,6 +480,7 @@ if have_fruity_backend
   backend_sources += [
     'fruity' / 'fruity-host-session.vala',
     'fruity' / 'xpc.vala',
+    'fruity' / 'xpc-glue.c',
     'fruity' / 'dtx.vala',
     'fruity' / 'lockdown.vala',
     'fruity' / 'installation-proxy.vala',
@@ -502,7 +503,7 @@ endif
 
 executable('xpc-test',
   'fruity/xpc.vala',
-  'fruity/xpc-glue.m',
+  'fruity/xpc-glue.c',
   'fruity/usbmux.vala',
   'fruity/plist.vala',
   vala_args: [

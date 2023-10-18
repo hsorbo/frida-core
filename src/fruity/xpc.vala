@@ -1,6 +1,23 @@
 [CCode (gir_namespace = "FridaXPC", gir_version = "1.0")]
 namespace Frida.XPC {
-	public extern static void _get_endpoint_for_device (string uuid);
+	public class PairingBrowser : Object {
+		public void * _backend;
+
+		construct {
+			_backend = _create_backend (this);
+		}
+
+		~PairingBrowser () {
+			_destroy_backend (_backend);
+		}
+
+		public void _on_match (string name, string host, uint16 port, Bytes txt_record) {
+			printerr ("on_match()\n\tname=\"%s\"\n\thost=\"%s\"\n\tport=%u\n", name, host, port);
+		}
+
+		public extern static void * _create_backend (PairingBrowser browser);
+		public extern static void _destroy_backend (void * backend);
+	}
 
 #if TEST
 	/*
@@ -35,12 +52,12 @@ namespace Frida.XPC {
 	*/
 
 	private int main (string[] args) {
-		_get_endpoint_for_device ("xxx");
-		/*
+		var browser = new PairingBrowser ();
+
 		var loop = new MainLoop ();
-		test_xpc.begin ();
+		//test_xpc.begin ();
 		loop.run ();
-		*/
+
 		return 0;
 	}
 #endif
