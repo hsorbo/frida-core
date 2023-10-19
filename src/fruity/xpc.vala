@@ -61,6 +61,7 @@ namespace Frida.XPC {
 				var connectable = NetworkAddress.parse (host, port);
 
 				var client = new SocketClient ();
+				printerr ("Connecting to %s:%u...\n", host, port);
 				connection = yield client.connect_async (connectable, cancellable);
 
 				printerr ("Connected to %s:%u\n", host, port);
