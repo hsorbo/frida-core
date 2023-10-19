@@ -37,12 +37,20 @@ namespace Frida.XPC {
 		private OutputStream output;
 		private Cancellable io_cancellable = new Cancellable ();
 
-		public void * session;
+		public Nghttp2.Session session;
 
 		private bool is_processing_messages;
 
 		public ServiceConnection (string host, uint16 port) {
 			Object (host: host, port: port);
+		}
+
+		construct {
+			Nghttp2.SessionCallbacks callbacks;
+			Nghttp2.SessionCallbacks.make (out callbacks);
+			callbacks.set_send_callback (on_send);
+
+			Nghttp2.Session.make_client (out session, callbacks, this);
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -69,9 +77,10 @@ namespace Frida.XPC {
 			return true;
 		}
 
-		private async void process_incoming_messages () {
-			_create_session ();
+		private async void submit_data (int stream_id, Bytes bytes) throws Error, IOError {
+		}
 
+		private async void process_incoming_messages () {
 			while (is_processing_messages) {
 				try {
 					var buffer = new uint8[4096];
@@ -79,57 +88,24 @@ namespace Frida.XPC {
 					ssize_t n = yield input.read_async (buffer, Priority.DEFAULT, io_cancellable);
 					printerr ("read_async() => %zd\n", n);
 					if (n == 0) {
+						printerr ("EOF!\n");
 						is_processing_messages = false;
 						continue;
 					}
 
-					_on_recv (buffer[:n]);
+					ssize_t result = session.mem_recv (buffer[:n]);
+					if (result < 0)
+						throw new Error.PROTOCOL ("%s", Nghttp2.strerror (result));
 				} catch (GLib.Error e) {
 					printerr ("Oops: %s\n", e.message);
 					is_processing_messages = false;
 				}
 			}
-
-			_destroy_session ();
 		}
 
-		public extern void _create_session ();
-		public extern void _destroy_session ();
-		public extern void _on_recv (uint8[] data) throws Error;
-	}
-
-#if TEST
-	private async void test_xpc () {
-		var connections = new Gee.HashMap<string, ServiceConnection> ();
-
-		var browser = new PairingBrowser ();
-		browser.service_discovered.connect ((name, host, port, txt_record) => {
-			if (connections.has_key (name))
-				return;
-
-			printerr ("[*] service_discovered\n\tname=\"%s\"\n\thost=\"%s\"\n\tport=%u\n", name, host, port);
-			var conn = new ServiceConnection (host, port);
-			connections[name] = conn;
-			init_connection.begin (conn);
-		});
-
-		yield;
-	}
-
-	private async void init_connection (ServiceConnection conn) {
-		try {
-			yield conn.init_async (Priority.DEFAULT, null);
-		} catch (GLib.Error e) {
-			printerr ("Oops: %s\n", e.message);
+		private static ssize_t on_send (Nghttp2.Session session, uint8[] data, int flags, void * user_data) {
+			printerr ("on_send() data.length=%zu\n", data.length);
+			return data.length;
 		}
 	}
-
-	private int main (string[] args) {
-		var loop = new MainLoop ();
-		test_xpc.begin ();
-		loop.run ();
-
-		return 0;
-	}
-#endif
 }

@@ -497,22 +497,6 @@ else
   fruity_sources += ['fruity/fruity-host-session-unix.c']
 endif
 
-executable('xpc-test',
-  'fruity/xpc.vala',
-  'fruity/xpc-glue.c',
-  'fruity/usbmux.vala',
-  'fruity/plist.vala',
-  vala_args: [
-    '--pkg=posix',
-    '--define=TEST',
-  ],
-  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep],
-  link_args: [
-    '-Wl,-framework,Foundation',
-    '-Wl,-framework,Network',
-  ],
-)
-
 droidy_sources = [
   'droidy/droidy-host-session.vala',
   'droidy/droidy-client.vala',
@@ -530,7 +514,7 @@ remote_sources = socket_sources + fruity_sources + droidy_sources + barebone_sou
 core_sources = base_sources + local_sources + remote_sources + compiler_sources
 
 internal_libs = [base, pipe] + backend_libs
-internal_deps = [base_dep, pipe_dep]
+internal_deps = [base_dep, pipe_dep, libnghttp2_dep]
 
 if host_os_family == 'windows'
   backend_deps += gio_windows_dep
@@ -556,3 +540,8 @@ core_dep = declare_dependency(
 
 core_build_dir = meson.current_build_dir()
 subdir('api')
+
+executable('xpc-test',
+  'fruity/xpc-test.vala',
+  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep, core_dep],
+)
