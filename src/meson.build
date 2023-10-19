@@ -501,22 +501,6 @@ if have_fruity_backend
   endif
 endif
 
-executable('xpc-test',
-  'fruity/xpc.vala',
-  'fruity/xpc-glue.c',
-  'fruity/usbmux.vala',
-  'fruity/plist.vala',
-  vala_args: [
-    '--pkg=posix',
-    '--define=TEST',
-  ],
-  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep],
-  link_args: [
-    '-Wl,-framework,Foundation',
-    '-Wl,-framework,Network',
-  ],
-)
-
 if have_droidy_backend
   backend_sources += [
     'droidy' / 'droidy-host-session.vala',
@@ -546,7 +530,7 @@ subdir('compiler')
 core_sources = base_sources + backend_sources + compiler_sources
 
 internal_libs = [base, pipe] + backend_libs
-internal_deps = [base_dep, pipe_dep]
+internal_deps = [base_dep, pipe_dep, libnghttp2_dep]
 
 if host_os_family == 'windows'
   gio_platform_vala_args = ['--pkg=gio-windows-2.0']
@@ -606,3 +590,8 @@ subdir('api')
 if 'core' in get_option('devkits')
   subdir('devkit')
 endif
+
+executable('xpc-test',
+  'fruity/xpc-test.vala',
+  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep, core_dep],
+)
