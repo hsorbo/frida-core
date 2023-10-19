@@ -41,6 +41,9 @@ namespace Frida.XPC {
 
 		private bool is_processing_messages;
 
+		private ByteArray? send_queue;
+		private Source? send_source;
+
 		public ServiceConnection (string host, uint16 port) {
 			Object (host: host, port: port);
 		}
@@ -48,7 +51,7 @@ namespace Frida.XPC {
 		construct {
 			NGHttp2.SessionCallbacks callbacks;
 			NGHttp2.SessionCallbacks.make (out callbacks);
-			callbacks.set_send_callback (on_send);
+			callbacks.set_send_callback (on_send_wrapper);
 
 			NGHttp2.ClientSession.make (out session, callbacks, this);
 		}
@@ -70,6 +73,25 @@ namespace Frida.XPC {
 				is_processing_messages = true;
 
 				process_incoming_messages.begin ();
+
+				int result = session.submit_settings (NGHttp2.Flag.NONE, {
+					{ MAX_CONCURRENT_STREAMS, 100 },
+					{ INITIAL_WINDOW_SIZE, 1048576 },
+				});
+				printerr ("submit_settings() => %d\n", result);
+
+				result = session.set_local_window_size (NGHttp2.Flag.NONE, 0, 1048576);
+				printerr ("set_local_window_size() => %d\n", result);
+
+				printerr ("calling send()\n");
+				result = session.send ();
+				printerr ("send() => %d\n", result);
+
+				int32 root_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
+				printerr ("submit_headers() => root_stream_id=%d\n", root_stream_id);
+
+				int32 reply_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
+				printerr ("submit_headers() => reply_stream_id=%d\n", reply_stream_id);
 			} catch (GLib.Error e) {
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
@@ -82,7 +104,7 @@ namespace Frida.XPC {
 			data_prd.source.ptr = bytes;
 			data_prd.read_callback = on_data_provider_read;
 			printerr (">>>\n");
-			int result = session.submit_data (NGHttp2.DataFlags.NO_END_STREAM, stream_id, data_prd);
+			int result = session.submit_data (NGHttp2.DataFlag.NO_END_STREAM, stream_id, data_prd);
 			printerr ("<<< result=%d\n", result);
 			if (result < 0)
 				throw new Error.PROTOCOL ("%s", NGHttp2.strerror (result));
@@ -120,10 +142,47 @@ namespace Frida.XPC {
 			}
 		}
 
-		private static ssize_t on_send (NGHttp2.Session session, uint8[] data, int flags, void * user_data) {
+		private static ssize_t on_send_wrapper (NGHttp2.Session session, uint8[] data, int flags, void * user_data) {
 			ServiceConnection * self = user_data;
-			printerr ("on_send() data.length=%zu\n", data.length);
+			return self->on_send (data, flags);
+		}
+
+		private ssize_t on_send (uint8[] data, int flags) {
+			printerr ("on_send() data.length=%zu flags=0x%x\n", data.length, flags);
+
+			if (send_source == null) {
+				send_queue = new ByteArray.sized (1024);
+
+				var source = new IdleSource ();
+				source.set_callback (() => {
+					do_send.begin ();
+					return Source.REMOVE;
+				});
+				source.attach (MainContext.get_thread_default ());
+				send_source = source;
+			}
+
+			if (send_queue == null)
+				return NGHttp2.ErrorCode.WOULDBLOCK;
+
+			send_queue.append (data);
 			return data.length;
+		}
+
+		private async void do_send () {
+			uint8[] buffer = send_queue.steal ();
+			send_queue = null;
+
+			try {
+				size_t bytes_written;
+				yield output.write_all_async (buffer, Priority.DEFAULT, io_cancellable, out bytes_written);
+			} catch (GLib.Error e) {
+				printerr ("write_all_async() failed: %s\n", e.message);
+			}
+
+			send_source = null;
+
+			printerr ("would do next send() here...\n");
 		}
 	}
 
