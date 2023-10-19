@@ -1,16 +1,24 @@
-[CCode (cheader_filename = "nghttp2/nghttp2.h", gir_namespace = "Nghttp2", gir_version = "1.0")]
-namespace Nghttp2 {
+[CCode (cheader_filename = "nghttp2/nghttp2.h", cprefix = "nghttp2_", gir_namespace = "NGHttp2", gir_version = "1.0")]
+namespace NGHttp2 {
 	[Compact]
-	[CCode (cname = "nghttp2_session", free_function = "nghttp2_session_del")]
+	[CCode (cname = "nghttp2_session", cprefix = "nghttp2_session_", free_function = "nghttp2_session_del")]
 	public class Session {
-		[CCode (cname = "nghttp2_session_client_new")]
-		public static void make_client (out Session session, SessionCallbacks callbacks, void * user_data);
+		[CCode (cname = "nghttp2_submit_data")]
+		public int submit_data (uint8 flags, int32 stream_id, DataProvider data_prd);
 
 		public ssize_t mem_recv ([CCode (array_length_type = "size_t")] uint8[] input);
 	}
 
 	[Compact]
-	[CCode (cname = "nghttp2_session_callbacks", free_function = "nghttp2_session_callbacks_del")]
+	[CCode (cname = "nghttp2_session", cprefix = "nghttp2_session_", free_function = "nghttp2_session_del")]
+	public class ClientSession : Session {
+		[CCode (cname = "nghttp2_session_client_new")]
+		public static void make (out ClientSession session, SessionCallbacks callbacks, void * user_data);
+	}
+
+	[Compact]
+	[CCode (cname = "nghttp2_session_callbacks", cprefix = "nghttp2_session_callbacks_",
+		free_function = "nghttp2_session_callbacks_del")]
 	public class SessionCallbacks {
 		[CCode (cname = "nghttp2_session_callbacks_new")]
 		public static void make (out SessionCallbacks callbacks);
@@ -22,6 +30,22 @@ namespace Nghttp2 {
 	public delegate ssize_t SendCallback (Session session, [CCode (array_length_type = "size_t")] uint8[] data, int flags,
 		void * user_data);
 
+	[CCode (cname = "nghttp2_data_provider")]
+	public struct DataProvider {
+		public DataSource source;
+		public DataSourceReadCallback read_callback;
+	}
+
+	[CCode (cname = "nghttp2_data_source")]
+	public struct DataSource {
+		public void * ptr;
+	}
+
+	[CCode (cname = "nghttp2_data_source_read_callback", has_target = false)]
+	public delegate ssize_t DataSourceReadCallback (Session session, int32 stream_id,
+		[CCode (array_length_type = "size_t")] uint8[] buf, ref uint32 data_flags, DataSource source, void * user_data);
+
+	[CCode (cname = "nghttp2_strerror")]
 	public unowned string strerror (ssize_t result);
 
 	[CCode (cprefix = "NGHTTP2_ERR_", has_type_id = false)]
@@ -67,5 +91,25 @@ namespace Nghttp2 {
 		CALLBACK_FAILURE,
 		BAD_CLIENT_MAGIC,
 		FLOODED,
+	}
+
+	[CCode (cprefix = "NGHTTP2_FLAG_", has_type_id = false)]
+	[Flags]
+	public enum FrameFlags {
+		NONE,
+		END_STREAM,
+		END_HEADERS,
+		ACK,
+		PADDED,
+		PRIORITY,
+	}
+
+	[CCode (cprefix = "NGHTTP2_DATA_FLAG_", has_type_id = false)]
+	[Flags]
+	public enum DataFlags {
+		NONE,
+		EOF,
+		NO_END_STREAM,
+		NO_COPY,
 	}
 }
