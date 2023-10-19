@@ -8,18 +8,8 @@ namespace Frida.XPC {
 	}
 
 	private async void test_xpc () {
-		var connections = new Gee.HashMap<string, ServiceConnection> ();
-
-		var browser = new PairingBrowser ();
-		browser.service_discovered.connect ((name, host, port, txt_record) => {
-			if (connections.has_key (name))
-				return;
-
-			printerr ("[*] service_discovered\n\tname=\"%s\"\n\thost=\"%s\"\n\tport=%u\n", name, host, port);
-			var conn = new ServiceConnection (host, port);
-			connections[name] = conn;
-			init_connection.begin (conn);
-		});
+		var conn = new ServiceConnection ("[fdd4:58e:e476::1]", 52412);
+		init_connection.begin (conn);
 
 		yield;
 	}
