@@ -52,15 +52,6 @@ namespace Frida.XPC {
 			NGHttp2.SessionCallbacks callbacks;
 			NGHttp2.SessionCallbacks.make (out callbacks);
 
-			// callbacks.set_before_frame_send_callback (on_before_frame_send);
-			// callbacks.set_on_header_callback (on_header);
-			// callbacks.set_on_begin_headers_callback (on_begin_headers);
-			// callbacks.set_on_frame_recv_callback (on_frame_recv);
-			// callbacks.set_on_frame_send_callback (on_frame_send);
-			// callbacks.set_send_data_callback (on_send_data);
-			// callbacks.set_on_frame_not_send_callback (on_frame_not_send);
-			// callbacks.set_on_invalid_frame_recv_callback (on_invalid_frame_recv);
-
 			callbacks.set_send_callback ((session, data, flags, user_data) => {
 				ServiceConnection * self = user_data;
 				return self->on_send (data, flags);
