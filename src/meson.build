@@ -510,6 +510,7 @@ if have_droidy_backend
     'droidy' / 'axml.vala',
   ]
 endif
+backend_vala_args += ['--pkg=libnghttp2']
 
 if have_socket_backend
   backend_sources += [
@@ -530,7 +531,8 @@ subdir('compiler')
 core_sources = base_sources + backend_sources + compiler_sources
 
 internal_libs = [base, pipe] + backend_libs
-internal_deps = [base_dep, pipe_dep, libnghttp2_dep]
+#internal_deps = [base_dep, pipe_dep, libnghttp2_dep]
+internal_deps = [base_dep, pipe_dep]
 
 if host_os_family == 'windows'
   gio_platform_vala_args = ['--pkg=gio-windows-2.0']
@@ -574,6 +576,7 @@ core = library('frida-core', core_sources,
   ],
   vala_gir: core_gir_name,
   link_args: backend_libs_private,
+  #link_with: backend_libs,
   link_with: backend_libs,
   dependencies: core_deps + internal_deps,
 )
@@ -593,5 +596,7 @@ endif
 
 executable('xpc-test',
   'fruity/xpc-test.vala',
+  vala_args: ['--pkg=libnghttp2'],
   dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep, core_dep],
+  link_args: ['-lapple_nghttp2'],
 )

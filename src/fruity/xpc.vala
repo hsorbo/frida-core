@@ -51,9 +51,30 @@ namespace Frida.XPC {
 		construct {
 			NGHttp2.SessionCallbacks callbacks;
 			NGHttp2.SessionCallbacks.make (out callbacks);
-			callbacks.set_send_callback (on_send_wrapper);
 
-			NGHttp2.ClientSession.make (out session, callbacks, this);
+			// callbacks.set_before_frame_send_callback (on_before_frame_send);
+			// callbacks.set_on_header_callback (on_header);
+			// callbacks.set_on_begin_headers_callback (on_begin_headers);
+			// callbacks.set_on_frame_recv_callback (on_frame_recv);
+			// callbacks.set_on_data_chunk_recv_callback (on_data_chunk_recv);
+			// callbacks.set_on_frame_send_callback (on_frame_send);
+			// callbacks.set_send_data_callback (on_send_data);
+			// callbacks.set_on_frame_not_send_callback (on_frame_not_send);
+			// callbacks.set_on_invalid_frame_recv_callback (on_invalid_frame_recv);
+
+			/* nghttp2.h:2158 */ callbacks.set_send_callback (on_send_wrapper);
+			/* nghttp2.h:2237 */ callbacks.set_on_stream_close_callback (on_stream_close);
+			/* nghttp2.h:2396 */ callbacks.set_error_callback (on_error);
+
+			NGHttp2.Option option;
+			NGHttp2.Option.make (out option);
+			option.set_no_auto_window_update (true);
+			option.set_peer_max_concurrent_streams (100);
+			option.set_no_http_messaging (true);
+			option.set_no_http_semantics (true);
+			option.set_no_closed_streams (true);
+
+			NGHttp2.ClientSession.make (out session, callbacks, this, option);
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -84,15 +105,10 @@ namespace Frida.XPC {
 				result = session.set_local_window_size (NGHttp2.Flag.NONE, 0, 1048576);
 				printerr ("set_local_window_size() => %d\n", result);
 
-				printerr ("calling send()\n");
-				result = session.send ();
-				printerr ("send() => %d\n", result);
+				//int32 reply_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
+				//printerr ("submit_headers() => reply_stream_id=%d\n", reply_stream_id);
 
-				int32 root_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
-				printerr ("submit_headers() => root_stream_id=%d\n", root_stream_id);
-
-				int32 reply_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
-				printerr ("submit_headers() => reply_stream_id=%d\n", reply_stream_id);
+				maybe_send_pending ();
 			} catch (GLib.Error e) {
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
@@ -100,24 +116,79 @@ namespace Frida.XPC {
 			return true;
 		}
 
-		public async void submit_data (int stream_id, Bytes bytes) throws Error, IOError {
+		private void maybe_send_pending () {
+			printerr ("[maybe_send_pending] >>>\n");
+			while (session.want_write ()) {
+				bool would_block = send_source != null && send_queue == null;
+				if (would_block) {
+					printerr ("[maybe_send_pending] would_block, so not doing anything\n");
+					break;
+				}
+
+				printerr ("[maybe_send_pending] calling send()\n");
+				int result = session.send ();
+				printerr ("[maybe_send_pending] send() => %d\n", result);
+			}
+			printerr ("[maybe_send_pending] <<<\n");
+		}
+
+		public async void submit_data (Bytes bytes) throws Error, IOError {
+			int32 stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
+			printerr ("submit_headers() => stream_id=%d\n", stream_id);
+
+			maybe_send_pending ();
+
+			var op = new SubmitOperation (bytes, submit_data.callback);
+
 			var data_prd = NGHttp2.DataProvider ();
-			data_prd.source.ptr = bytes;
+			data_prd.source.ptr = op;
 			data_prd.read_callback = on_data_provider_read;
 			printerr (">>>\n");
 			int result = session.submit_data (NGHttp2.DataFlag.NO_END_STREAM, stream_id, data_prd);
-			printerr ("<<< result=%d\n", result);
+			printerr ("<<< yay, result=%d\n", result);
 			if (result < 0)
 				throw new Error.PROTOCOL ("%s", NGHttp2.strerror (result));
+
+			while (op.cursor != bytes.get_size ()) {
+				printerr (">>> yield\n");
+				yield;
+				printerr ("<<< yield\n");
+			}
 		}
 
 		private static ssize_t on_data_provider_read (NGHttp2.Session session, int32 stream_id, uint8[] buf, ref uint32 data_flags,
 				NGHttp2.DataSource source, void * user_data) {
-			Bytes * bytes = source.ptr;
+			var op = (SubmitOperation) source.ptr;
 
-			printerr ("\t[*] on_data_provider_read()\n");
+			unowned uint8[] data = op.bytes.get_data ();
+			printerr ("\t[*] on_data_provider_read() cursor=%u buf.length=%zu data.length=%d\n", op.cursor, buf.length, data.length);
 
-			return 0;
+			uint remaining = data.length - op.cursor;
+			if (remaining == 0) {
+				data_flags |= NGHttp2.DataFlag.EOF;
+				op.callback ();
+				return 0;
+			}
+
+			uint n = uint.min (remaining, buf.length);
+			Memory.copy (buf, (uint8 *) data + op.cursor, n);
+			printerr ("\t\t=> n=%u\n", n);
+
+			op.cursor += n;
+
+			return n;
+		}
+
+		private class SubmitOperation {
+			public Bytes bytes;
+			public SourceFunc callback;
+
+			public uint cursor = 0;
+
+			public SubmitOperation (Bytes bytes, owned SourceFunc callback) {
+				this.bytes = bytes;
+				this.callback = (owned) callback;
+			}
 		}
 
 		private async void process_incoming_messages () {
@@ -133,9 +204,13 @@ namespace Frida.XPC {
 						continue;
 					}
 
+					hexdump (buffer[:n]);
+
 					ssize_t result = session.mem_recv (buffer[:n]);
 					if (result < 0)
 						throw new Error.PROTOCOL ("%s", NGHttp2.strerror (result));
+
+					session.consume_connection (n);
 				} catch (GLib.Error e) {
 					printerr ("Oops: %s\n", e.message);
 					is_processing_messages = false;
@@ -143,7 +218,8 @@ namespace Frida.XPC {
 			}
 		}
 
-		private static ssize_t on_send_wrapper (NGHttp2.Session session, uint8[] data, int flags, void * user_data) {
+		private static ssize_t on_send_wrapper (NGHttp2.Session session, [CCode (array_length_type = "size_t")] uint8[] data,
+				int flags, void * user_data) {
 			ServiceConnection * self = user_data;
 			return self->on_send (data, flags);
 		}
@@ -183,7 +259,20 @@ namespace Frida.XPC {
 
 			send_source = null;
 
-			printerr ("would do next send() here...\n");
+			printerr ("doing next send() here...\n");
+			maybe_send_pending ();
+		}
+
+		private static int on_stream_close (NGHttp2.Session session, int32 stream_id, uint32 error_code, void * user_data) {
+			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
+			return 0;
+		}
+
+		private static int on_error (NGHttp2.Session session, NGHttp2.ErrorCode code,
+				[CCode (array_length_type = "size_t")] char[] msg, void * user_data) {
+			string m = ((string) msg).substring (0, msg.length);
+			printerr ("on_error() code=%d msg=\"%s\"\n", code, m);
+			return 0;
 		}
 	}
 
@@ -318,5 +407,32 @@ namespace Frida.XPC {
 		UINT64     = 0x00004000,
 		STRING     = 0x00009000,
 		DICTIONARY = 0x0000f000,
+	}
+
+	// https://gist.github.com/phako/96b36b5070beaf7eee27
+	private void hexdump (uint8[] data) {
+		var builder = new StringBuilder.sized (16);
+		var i = 0;
+
+		foreach (var c in data) {
+			if (i % 16 == 0)
+				printerr ("%08x | ", i);
+
+			printerr ("%02x ", c);
+
+			if (((char) c).isprint ())
+				builder.append_c ((char) c);
+			else
+				builder.append (".");
+
+			i++;
+			if (i % 16 == 0) {
+				printerr ("| %s\n", builder.str);
+				builder.erase ();
+			}
+		}
+
+		if (i % 16 != 0)
+			printerr ("%s| %s\n", string.nfill ((16 - (i % 16)) * 3, ' '), builder.str);
 	}
 }

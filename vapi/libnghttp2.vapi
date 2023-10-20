@@ -9,7 +9,6 @@ namespace NGHttp2 {
 		[CCode (cname = "nghttp2_submit_window_update")]
 		public int submit_window_update (uint8 flags, int32 stream_id, int32 window_size_increment);
 
-		[CCode (cname = "nghttp2_session_set_local_window_size")]
 		public int set_local_window_size (uint8 flags, int32 stream_id, int32 window_size);
 
 		[CCode (cname = "nghttp2_submit_request")]
@@ -21,17 +20,22 @@ namespace NGHttp2 {
 		[CCode (cname = "nghttp2_submit_data")]
 		public int submit_data (uint8 flags, int32 stream_id, DataProvider data_prd);
 
-		[CCode (cname = "nghttp2_session_send")]
 		public int send ();
 
-		public ssize_t mem_recv ([CCode (array_length_type = "size_t")] uint8[] input);
+		public ssize_t mem_recv (uint8[] input);
+
+		public bool want_read ();
+
+		public bool want_write ();
+
+		public int consume_connection (size_t size);
 	}
 
 	[Compact]
 	[CCode (cname = "nghttp2_session", cprefix = "nghttp2_session_", free_function = "nghttp2_session_del")]
 	public class ClientSession : Session {
-		[CCode (cname = "nghttp2_session_client_new")]
-		public static void make (out ClientSession session, SessionCallbacks callbacks, void * user_data);
+		[CCode (cname = "nghttp2_session_client_new2")]
+		public static int make (out ClientSession session, SessionCallbacks callbacks, void * user_data, Option? option = null);
 	}
 
 	[Compact]
@@ -39,14 +43,48 @@ namespace NGHttp2 {
 		free_function = "nghttp2_session_callbacks_del")]
 	public class SessionCallbacks {
 		[CCode (cname = "nghttp2_session_callbacks_new")]
-		public static void make (out SessionCallbacks callbacks);
+		public static int make (out SessionCallbacks callbacks);
 
 		public void set_send_callback (SendCallback callback);
+		public void set_on_stream_close_callback (OnStreamCloseCallback callback);
+		[CCode (cname = "nghttp2_session_callbacks_set_error_callback2")]
+		public void set_error_callback (ErrorCallback callback);
 	}
 
 	[CCode (cname = "nghttp2_send_callback", has_target = false)]
 	public delegate ssize_t SendCallback (Session session, [CCode (array_length_type = "size_t")] uint8[] data, int flags,
 		void * user_data);
+
+	[CCode (cname = "nghttp2_on_stream_close_callback", has_target = false)]
+	public delegate int OnStreamCloseCallback (Session session, int32 stream_id, uint32 error_code, void * user_data);
+
+	[CCode (cname = "nghttp2_error_callback2", has_target = false)]
+	public delegate int ErrorCallback (Session session, ErrorCode code, [CCode (array_length_type = "size_t")] char[] msg,
+		void * user_data);
+
+	[Compact]
+	[CCode (cname = "nghttp2_option", cprefix = "nghttp2_option_", free_function = "nghttp2_option_del")]
+	public class Option {
+		[CCode (cname = "nghttp2_option_new")]
+		public static int make (out Option option);
+
+		public void set_no_auto_window_update (bool val);
+		public void set_peer_max_concurrent_streams (uint32 val);
+		public void set_no_recv_client_magic (bool val);
+		public void set_no_http_messaging (bool val);
+		public void set_no_http_semantics (bool val);
+		public void set_max_reserved_remote_streams (uint32 val);
+		public void set_user_recv_extension_type (uint8 type);
+		public void set_builtin_recv_extension_type (uint8 type);
+		public void set_no_auto_ping_ack (bool val);
+		public void set_max_send_header_block_length (size_t val);
+		public void set_max_deflate_dynamic_table_size (size_t val);
+		public void set_no_closed_streams (bool val);
+		public void set_max_outbound_ack (size_t val);
+		public void set_max_settings (size_t val);
+		public void set_server_fallback_rfc7540_priorities (bool val);
+		public void set_no_rfc9113_leading_and_trailing_ws_validation (bool val);
+	}
 
 	[CCode (cname = "nghttp2_settings_entry")]
 	public struct SettingsEntry {
