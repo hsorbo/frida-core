@@ -56,15 +56,27 @@ namespace Frida.XPC {
 			// callbacks.set_on_header_callback (on_header);
 			// callbacks.set_on_begin_headers_callback (on_begin_headers);
 			// callbacks.set_on_frame_recv_callback (on_frame_recv);
-			// callbacks.set_on_data_chunk_recv_callback (on_data_chunk_recv);
 			// callbacks.set_on_frame_send_callback (on_frame_send);
 			// callbacks.set_send_data_callback (on_send_data);
 			// callbacks.set_on_frame_not_send_callback (on_frame_not_send);
 			// callbacks.set_on_invalid_frame_recv_callback (on_invalid_frame_recv);
 
-			/* nghttp2.h:2158 */ callbacks.set_send_callback (on_send_wrapper);
-			/* nghttp2.h:2237 */ callbacks.set_on_stream_close_callback (on_stream_close);
-			/* nghttp2.h:2396 */ callbacks.set_error_callback (on_error);
+			callbacks.set_send_callback ((session, data, flags, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_send (data, flags);
+			});
+			callbacks.set_on_data_chunk_recv_callback ((session, flags, stream_id, data, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_data_chunk_recv (flags, stream_id, data);
+			});
+			callbacks.set_on_stream_close_callback ((session, stream_id, error_code, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_stream_close (stream_id, error_code);
+			});
+			callbacks.set_error_callback ((session, code, msg, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_error (code, msg);
+			});
 
 			NGHttp2.Option option;
 			NGHttp2.Option.make (out option);
@@ -197,14 +209,11 @@ namespace Frida.XPC {
 					var buffer = new uint8[4096];
 
 					ssize_t n = yield input.read_async (buffer, Priority.DEFAULT, io_cancellable);
-					printerr ("read_async() => %zd\n", n);
 					if (n == 0) {
 						printerr ("EOF!\n");
 						is_processing_messages = false;
 						continue;
 					}
-
-					hexdump (buffer[:n]);
 
 					ssize_t result = session.mem_recv (buffer[:n]);
 					if (result < 0)
@@ -216,12 +225,6 @@ namespace Frida.XPC {
 					is_processing_messages = false;
 				}
 			}
-		}
-
-		private static ssize_t on_send_wrapper (NGHttp2.Session session, [CCode (array_length_type = "size_t")] uint8[] data,
-				int flags, void * user_data) {
-			ServiceConnection * self = user_data;
-			return self->on_send (data, flags);
 		}
 
 		private ssize_t on_send (uint8[] data, int flags) {
@@ -263,13 +266,18 @@ namespace Frida.XPC {
 			maybe_send_pending ();
 		}
 
-		private static int on_stream_close (NGHttp2.Session session, int32 stream_id, uint32 error_code, void * user_data) {
+		private int on_data_chunk_recv (uint8 flags, int32 stream_id, uint8[] data) {
+			printerr ("on_data_chunk_recv() flags=0x%x stream_id=%d\n", flags, stream_id);
+			hexdump (data);
+			return 0;
+		}
+
+		private int on_stream_close (int32 stream_id, uint32 error_code) {
 			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
 			return 0;
 		}
 
-		private static int on_error (NGHttp2.Session session, NGHttp2.ErrorCode code,
-				[CCode (array_length_type = "size_t")] char[] msg, void * user_data) {
+		private int on_error (NGHttp2.ErrorCode code, char[] msg) {
 			string m = ((string) msg).substring (0, msg.length);
 			printerr ("on_error() code=%d msg=\"%s\"\n", code, m);
 			return 0;

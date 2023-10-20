@@ -46,6 +46,7 @@ namespace NGHttp2 {
 		public static int make (out SessionCallbacks callbacks);
 
 		public void set_send_callback (SendCallback callback);
+		public void set_on_data_chunk_recv_callback (OnDataChunkRecvCallback callback);
 		public void set_on_stream_close_callback (OnStreamCloseCallback callback);
 		[CCode (cname = "nghttp2_session_callbacks_set_error_callback2")]
 		public void set_error_callback (ErrorCallback callback);
@@ -54,6 +55,10 @@ namespace NGHttp2 {
 	[CCode (cname = "nghttp2_send_callback", has_target = false)]
 	public delegate ssize_t SendCallback (Session session, [CCode (array_length_type = "size_t")] uint8[] data, int flags,
 		void * user_data);
+
+	[CCode (cname = "nghttp2_on_data_chunk_recv_callback", has_target = false)]
+	public delegate int OnDataChunkRecvCallback (Session session, uint8 flags, int32 stream_id,
+		[CCode (array_length_type = "size_t")] uint8[] data, void * user_data);
 
 	[CCode (cname = "nghttp2_on_stream_close_callback", has_target = false)]
 	public delegate int OnStreamCloseCallback (Session session, int32 stream_id, uint32 error_code, void * user_data);
