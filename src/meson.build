@@ -496,7 +496,6 @@ elif host_os_family == 'darwin'
 else
   fruity_sources += ['fruity/fruity-host-session-unix.c']
 endif
-backend_vala_args += ['--pkg=libnghttp2']
 
 droidy_sources = [
   'droidy/droidy-host-session.vala',
@@ -515,8 +514,7 @@ remote_sources = socket_sources + fruity_sources + droidy_sources + barebone_sou
 core_sources = base_sources + local_sources + remote_sources + compiler_sources
 
 internal_libs = [base, pipe] + backend_libs
-#internal_deps = [base_dep, pipe_dep, libnghttp2_dep]
-internal_deps = [base_dep, pipe_dep]
+internal_deps = [base_dep, pipe_dep, libnghttp2_dep]
 
 if host_os_family == 'windows'
   backend_deps += gio_windows_dep
@@ -529,7 +527,6 @@ core = library('frida-core', core_sources,
   vala_args: backend_vala_args,
   vala_gir: 'Frida-' + api_version + '.gir',
   link_args: backend_libs_private,
-  #link_with: backend_libs,
   link_with: backend_libs,
   dependencies: [glib_dep, gobject_dep, gmodule_dep, gio_dep, gee_dep, json_glib_dep, gum_dep, gumjs_inspector_dep, brotlidec_dep, tls_provider_dep] + backend_deps + internal_deps,
 )
@@ -546,7 +543,5 @@ subdir('api')
 
 executable('xpc-test',
   'fruity/xpc-test.vala',
-  vala_args: ['--pkg=libnghttp2'],
   dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep, core_dep],
-  link_args: ['-lapple_nghttp2'],
 )
