@@ -71,7 +71,7 @@ namespace Frida.XPC {
 			option.set_no_auto_window_update (true);
 			option.set_peer_max_concurrent_streams (100);
 			option.set_no_http_messaging (true);
-			option.set_no_http_semantics (true);
+			// option.set_no_http_semantics (true);
 			option.set_no_closed_streams (true);
 
 			NGHttp2.ClientSession.make (out session, callbacks, this, option);
