@@ -39,8 +39,8 @@ namespace Frida.XPC {
 
 		public NGHttp2.Session session;
 
-		private int32 root_stream_id;
-		private int32 reply_stream_id;
+		private Stream root_stream;
+		private Stream reply_stream;
 
 		private bool is_processing_messages;
 
@@ -59,9 +59,17 @@ namespace Frida.XPC {
 				ServiceConnection * self = user_data;
 				return self->on_send (data, flags);
 			});
+			callbacks.set_on_begin_frame_callback ((session, hd, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_begin_frame (hd);
+			});
 			callbacks.set_on_data_chunk_recv_callback ((session, flags, stream_id, data, user_data) => {
 				ServiceConnection * self = user_data;
 				return self->on_data_chunk_recv (flags, stream_id, data);
+			});
+			callbacks.set_on_frame_recv_callback ((session, frame, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_frame_recv (frame);
 			});
 			callbacks.set_on_stream_close_callback ((session, stream_id, error_code, user_data) => {
 				ServiceConnection * self = user_data;
@@ -109,25 +117,23 @@ namespace Frida.XPC {
 
 				session.set_local_window_size (NGHttp2.Flag.NONE, 0, 1048576);
 
-				root_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
-				maybe_send_pending ();
+				root_stream = make_stream ();
 
 				Bytes header_request = new RequestBuilder (HEADER)
 					.begin_dictionary ()
 					.end_dictionary ()
 					.build ();
-				yield submit_data (root_stream_id, header_request);
+				yield submit_data (root_stream.id, header_request);
 
 				Bytes ping_request = new RequestBuilder (PING)
 					.build ();
-				yield submit_data (root_stream_id, ping_request);
+				yield submit_data (root_stream.id, ping_request);
 
-				reply_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
-				maybe_send_pending ();
+				reply_stream = make_stream ();
 
 				Bytes open_reply_channel_request = new RequestBuilder (HEADER, HEADER_OPENS_REPLY_CHANNEL)
 					.build ();
-				yield submit_data (reply_stream_id, open_reply_channel_request);
+				yield submit_data (reply_stream.id, open_reply_channel_request);
 			} catch (GLib.Error e) {
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
@@ -262,9 +268,44 @@ namespace Frida.XPC {
 			maybe_send_pending ();
 		}
 
+		private int on_begin_frame (NGHttp2.FrameHd hd) {
+			printerr ("\non_begin_frame() length=%zu stream_id=%d type=%u flags=0x%x reserved=%u\n", hd.length, hd.stream_id, hd.type, hd.flags, hd.reserved);
+			if (hd.type != DATA)
+				return 0;
+
+			Stream? stream = find_stream_by_id (hd.stream_id);
+			if (stream == null)
+				return -1;
+
+			return stream.on_begin_frame (hd);
+		}
+
 		private int on_data_chunk_recv (uint8 flags, int32 stream_id, uint8[] data) {
 			printerr ("on_data_chunk_recv() flags=0x%x stream_id=%d\n", flags, stream_id);
-			hexdump (data);
+
+			Stream? stream = find_stream_by_id (stream_id);
+			if (stream == null)
+				return -1;
+
+			return stream.on_data_chunk_recv (data);
+		}
+
+		private int on_frame_recv (NGHttp2.Frame frame) {
+			printerr ("on_frame_recv() length=%zu stream_id=%d type=%u flags=0x%x reserved=%u\n", frame.hd.length, frame.hd.stream_id, frame.hd.type, frame.hd.flags, frame.hd.reserved);
+
+			if (frame.hd.type != DATA)
+				return 0;
+
+			Stream? stream = find_stream_by_id (frame.hd.stream_id);
+			if (stream == null)
+				return -1;
+
+			if (stream.incoming_message == null)
+				return -1;
+
+			printerr ("Ready to parse:\n");
+			hexdump (stream.incoming_message.data);
+
 			return 0;
 		}
 
@@ -277,6 +318,47 @@ namespace Frida.XPC {
 			string m = ((string) msg).substring (0, msg.length);
 			printerr ("on_error() code=%d msg=\"%s\"\n", code, m);
 			return 0;
+		}
+
+		private Stream make_stream () {
+			int stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
+			maybe_send_pending ();
+
+			return new Stream (stream_id);
+		}
+
+		private Stream? find_stream_by_id (int32 id) {
+			if (root_stream.id == id)
+				return root_stream;
+			if (reply_stream.id == id)
+				return reply_stream;
+			return null;
+		}
+
+		private class Stream {
+			public int32 id;
+
+			public ByteArray? incoming_message;
+
+			private const size_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // TODO: Revisit
+
+			public Stream (int32 id) {
+				this.id = id;
+			}
+
+			public int on_begin_frame (NGHttp2.FrameHd hd) {
+				if (hd.length > MAX_MESSAGE_SIZE)
+					return -1;
+				incoming_message = new ByteArray.sized ((uint) hd.length);
+				return 0;
+			}
+
+			public int on_data_chunk_recv (uint8[] data) {
+				if (incoming_message == null)
+					return -1;
+				incoming_message.append (data);
+				return 0;
+			}
 		}
 	}
 
@@ -461,3 +543,4 @@ namespace Frida.XPC {
 			printerr ("%s| %s\n", string.nfill ((16 - (i % 16)) * 3, ' '), builder.str);
 	}
 }
+

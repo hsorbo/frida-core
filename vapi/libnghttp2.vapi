@@ -46,8 +46,10 @@ namespace NGHttp2 {
 		public static int make (out SessionCallbacks callbacks);
 
 		public void set_send_callback (SendCallback callback);
+		public void set_on_frame_recv_callback (OnFrameRecvCallback callback);
 		public void set_on_data_chunk_recv_callback (OnDataChunkRecvCallback callback);
 		public void set_on_stream_close_callback (OnStreamCloseCallback callback);
+		public void set_on_begin_frame_callback (OnBeginFrameCallback callback);
 		[CCode (cname = "nghttp2_session_callbacks_set_error_callback2")]
 		public void set_error_callback (ErrorCallback callback);
 	}
@@ -56,6 +58,9 @@ namespace NGHttp2 {
 	public delegate ssize_t SendCallback (Session session, [CCode (array_length_type = "size_t")] uint8[] data, int flags,
 		void * user_data);
 
+	[CCode (cname = "nghttp2_on_frame_recv_callback", has_target = false)]
+	public delegate int OnFrameRecvCallback (Session session, Frame frame, void * user_data);
+
 	[CCode (cname = "nghttp2_on_data_chunk_recv_callback", has_target = false)]
 	public delegate int OnDataChunkRecvCallback (Session session, uint8 flags, int32 stream_id,
 		[CCode (array_length_type = "size_t")] uint8[] data, void * user_data);
@@ -63,9 +68,135 @@ namespace NGHttp2 {
 	[CCode (cname = "nghttp2_on_stream_close_callback", has_target = false)]
 	public delegate int OnStreamCloseCallback (Session session, int32 stream_id, uint32 error_code, void * user_data);
 
+	[CCode (cname = "nghttp2_on_begin_frame_callback", has_target = false)]
+	public delegate int OnBeginFrameCallback (Session session, FrameHd hd, void * user_data);
+
 	[CCode (cname = "nghttp2_error_callback2", has_target = false)]
 	public delegate int ErrorCallback (Session session, ErrorCode code, [CCode (array_length_type = "size_t")] char[] msg,
 		void * user_data);
+
+	[CCode (cname = "nghttp2_frame")]
+	public struct Frame {
+		public FrameHd hd;
+		public DataFrame data;
+		public HeadersFrame headers;
+		public PriorityFrame priority;
+		public RstStreamFrame rst_stream;
+		public SettingsFrame settings;
+		public PushPromiseFrame push_promise;
+		public PingFrame ping;
+		public GoawayFrame goaway;
+		public WindowUpdateFrame window_update;
+		public ExtensionFrame ext;
+	}
+
+	[CCode (cname = "nghttp2_frame_type", cprefix = "NGHTTP2_", has_type_id = false)]
+	public enum FrameType {
+		DATA,
+		HEADERS,
+		PRIORITY,
+		RST_STREAM,
+		SETTINGS,
+		PUSH_PROMISE,
+		PING,
+		GOAWAY,
+		WINDOW_UPDATE,
+		CONTINUATION,
+		ALTSVC,
+		ORIGIN,
+		PRIORITY_UPDATE,
+	}
+
+	[CCode (cname = "nghttp2_frame_hd")]
+	public struct FrameHd {
+		public size_t length;
+		public int32 stream_id;
+		public FrameType type;
+		public uint8 flags;
+		public uint8 reserved;
+	}
+
+	[CCode (cname = "nghttp2_data")]
+	public struct DataFrame {
+		public FrameHd hd;
+		public size_t padlen;
+	}
+
+	[CCode (cname = "nghttp2_headers")]
+	public struct HeadersFrame {
+		public FrameHd hd;
+		public size_t padlen;
+		public PrioritySpec pri_spec;
+		public NV * nva;
+		public size_t nvlen;
+		public HeadersCategory cat;
+	}
+
+	[CCode (cname = "nghttp2_headers_category", cprefix = "NGHTTP2_HCAT_", has_type_id = false)]
+	public enum HeadersCategory {
+		REQUEST,
+		RESPONSE,
+		PUSH_RESPONSE,
+		HEADERS,
+	}
+
+	[CCode (cname = "nghttp2_priority")]
+	public struct PriorityFrame {
+		public FrameHd hd;
+		public PrioritySpec pri_spec;
+	}
+
+	[CCode (cname = "nghttp2_rst_stream")]
+	public struct RstStreamFrame {
+		public FrameHd hd;
+		public uint32 error_code;
+	}
+
+	[CCode (cname = "nghttp2_settings")]
+	public struct SettingsFrame {
+		public FrameHd hd;
+		public size_t niv;
+		public SettingsEntry * iv;
+	}
+
+	[CCode (cname = "nghttp2_push_promise")]
+	public struct PushPromiseFrame {
+		public FrameHd hd;
+		public size_t padlen;
+		public NV * nva;
+		public size_t nvlen;
+		public int32 promised_stream_id;
+		public uint8 reserved;
+	}
+
+	[CCode (cname = "nghttp2_ping")]
+	public struct PingFrame {
+		public FrameHd hd;
+		public uint8[] opaque_data;
+	}
+
+	[CCode (cname = "nghttp2_goaway")]
+	public struct GoawayFrame {
+		public FrameHd hd;
+		public int32 last_stream_id;
+		public uint32 error_code;
+		public uint8 * opaque_data;
+		public size_t opaque_data_len;
+		public uint8 reserved;
+	}
+
+	[CCode (cname = "nghttp2_window_update")]
+	public struct WindowUpdateFrame {
+		public FrameHd hd;
+		public int32 window_size_increment;
+		public uint8 reserved;
+	}
+
+	[CCode (cname = "nghttp2_extension")]
+	public struct ExtensionFrame {
+		public FrameHd hd;
+		public void * payload;
+	}
 
 	[Compact]
 	[CCode (cname = "nghttp2_option", cprefix = "nghttp2_option_", free_function = "nghttp2_option_del")]
