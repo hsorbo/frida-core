@@ -39,6 +39,9 @@ namespace Frida.XPC {
 
 		public NGHttp2.Session session;
 
+		private int32 root_stream_id;
+		private int32 reply_stream_id;
+
 		private bool is_processing_messages;
 
 		private ByteArray? send_queue;
@@ -99,19 +102,36 @@ namespace Frida.XPC {
 
 				process_incoming_messages.begin ();
 
-				int result = session.submit_settings (NGHttp2.Flag.NONE, {
+				session.submit_settings (NGHttp2.Flag.NONE, {
 					{ MAX_CONCURRENT_STREAMS, 100 },
 					{ INITIAL_WINDOW_SIZE, 1048576 },
 				});
-				printerr ("submit_settings() => %d\n", result);
 
-				result = session.set_local_window_size (NGHttp2.Flag.NONE, 0, 1048576);
-				printerr ("set_local_window_size() => %d\n", result);
+				session.set_local_window_size (NGHttp2.Flag.NONE, 0, 1048576);
 
-				//int32 reply_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
-				//printerr ("submit_headers() => reply_stream_id=%d\n", reply_stream_id);
-
+				root_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
 				maybe_send_pending ();
+
+				Bytes header_request = new RequestBuilder (HEADER)
+					.begin_dictionary ()
+					.end_dictionary ()
+					.build ();
+				yield submit_data (root_stream_id, header_request);
+
+				Bytes ping_request = new RequestBuilder (PING)
+					.begin_dictionary ()
+					.end_dictionary ()
+					.build ();
+				yield submit_data (root_stream_id, ping_request);
+
+				reply_stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
+				maybe_send_pending ();
+
+				Bytes open_reply_channel_request = new RequestBuilder (HEADER, HEADER_OPENS_REPLY_CHANNEL)
+					.begin_dictionary ()
+					.end_dictionary ()
+					.build ();
+				yield submit_data (reply_stream_id, open_reply_channel_request);
 			} catch (GLib.Error e) {
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
@@ -120,42 +140,36 @@ namespace Frida.XPC {
 		}
 
 		private void maybe_send_pending () {
-			printerr ("[maybe_send_pending] >>>\n");
 			while (session.want_write ()) {
 				bool would_block = send_source != null && send_queue == null;
-				if (would_block) {
-					printerr ("[maybe_send_pending] would_block, so not doing anything\n");
+				if (would_block)
 					break;
-				}
 
-				printerr ("[maybe_send_pending] calling send()\n");
-				int result = session.send ();
-				printerr ("[maybe_send_pending] send() => %d\n", result);
+				session.send ();
 			}
-			printerr ("[maybe_send_pending] <<<\n");
 		}
 
-		public async void submit_data (Bytes bytes) throws Error, IOError {
-			int32 stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
-			printerr ("submit_headers() => stream_id=%d\n", stream_id);
-
-			maybe_send_pending ();
-
-			var op = new SubmitOperation (bytes, submit_data.callback);
+		private async void submit_data (int32 stream_id, Bytes bytes) throws Error, IOError {
+			bool waiting = false;
+			var op = new SubmitOperation (bytes, () => {
+				if (waiting)
+					submit_data.callback ();
+				return Source.REMOVE;
+			});
 
 			var data_prd = NGHttp2.DataProvider ();
 			data_prd.source.ptr = op;
 			data_prd.read_callback = on_data_provider_read;
-			printerr (">>>\n");
 			int result = session.submit_data (NGHttp2.DataFlag.NO_END_STREAM, stream_id, data_prd);
-			printerr ("<<< yay, result=%d\n", result);
 			if (result < 0)
 				throw new Error.PROTOCOL ("%s", NGHttp2.strerror (result));
 
+			maybe_send_pending ();
+
 			while (op.cursor != bytes.get_size ()) {
-				printerr (">>> yield\n");
+				waiting = true;
 				yield;
-				printerr ("<<< yield\n");
+				waiting = false;
 			}
 		}
 
@@ -164,7 +178,6 @@ namespace Frida.XPC {
 			var op = (SubmitOperation) source.ptr;
 
 			unowned uint8[] data = op.bytes.get_data ();
-			printerr ("\t[*] on_data_provider_read() cursor=%u buf.length=%zu data.length=%d\n", op.cursor, buf.length, data.length);
 
 			uint remaining = data.length - op.cursor;
 			if (remaining == 0) {
@@ -175,7 +188,6 @@ namespace Frida.XPC {
 
 			uint n = uint.min (remaining, buf.length);
 			Memory.copy (buf, (uint8 *) data + op.cursor, n);
-			printerr ("\t\t=> n=%u\n", n);
 
 			op.cursor += n;
 
@@ -219,8 +231,6 @@ namespace Frida.XPC {
 		}
 
 		private ssize_t on_send (uint8[] data, int flags) {
-			printerr ("on_send() data.length=%zu flags=0x%x\n", data.length, flags);
-
 			if (send_source == null) {
 				send_queue = new ByteArray.sized (1024);
 
@@ -253,7 +263,6 @@ namespace Frida.XPC {
 
 			send_source = null;
 
-			printerr ("doing next send() here...\n");
 			maybe_send_pending ();
 		}
 
@@ -277,13 +286,16 @@ namespace Frida.XPC {
 
 	public class RequestBuilder : ObjectBuilder {
 		private const uint32 MAGIC = 0x29b00b92;
+		private const uint8 PROTOCOL_VERSION = 1;
 
-		private uint32 flags;
-		private uint64 msg_id;
+		private MessageType message_type;
+		private MessageFlags message_flags;
+		private uint64 message_id;
 
-		public RequestBuilder (uint32 flags, uint64 msg_id) {
-			this.flags = flags;
-			this.msg_id = msg_id;
+		public RequestBuilder (MessageType message_type, MessageFlags message_flags = NONE, uint64 message_id = 0) {
+			this.message_type = message_type;
+			this.message_flags = message_flags;
+			this.message_id = message_id;
 		}
 
 		public override Bytes build () {
@@ -291,12 +303,30 @@ namespace Frida.XPC {
 
 			return new BufferBuilder (8, LITTLE_ENDIAN)
 				.append_uint32 (MAGIC)
-				.append_uint32 (flags)
+				.append_uint8 (PROTOCOL_VERSION)
+				.append_uint8 (message_type)
+				.append_uint16 (message_flags)
 				.append_uint64 (body.length)
-				.append_uint64 (msg_id)
+				.append_uint64 (message_id)
 				.append_bytes (body)
 				.build ();
 		}
+	}
+
+	public enum MessageType {
+		HEADER,
+		MSG,
+		PING,
+	}
+
+	[Flags]
+	public enum MessageFlags {
+		NONE				= 0,
+		WANTS_REPLY			= (1 << 0),
+		IS_REPLY			= (1 << 1),
+		HEADER_OPENS_STREAM_TX		= (1 << 4),
+		HEADER_OPENS_STREAM_RX		= (1 << 5),
+		HEADER_OPENS_REPLY_CHANNEL	= (1 << 6),
 	}
 
 	public class ObjectBuilder {
