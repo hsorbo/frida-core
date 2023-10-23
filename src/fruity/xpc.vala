@@ -455,21 +455,78 @@ namespace Frida.XPC {
 
 			description.append_printf (("Message {" +
 					"\n\ttype: %s," +
-					"\n\tflags: 0x%04x," +
+					"\n\tflags: %s," +
 					"\n\tid: %" + int64.FORMAT_MODIFIER + "u,"),
-				type.to_nick (),
-				flags,
+				type.to_nick ().up (),
+				flags.print (),
 				id);
 
 			if (body != null) {
-				description
-					.append ("\n\tbody: ")
-					.append (body.print (false));
+				description.append ("\n\tbody: ");
+				print_variant (body, description, 1);
+				description.append_c (',');
 			}
 
 			description.append ("\n}");
 
 			return description.str;
+		}
+
+		private static void print_variant (Variant v, StringBuilder sink, uint depth = 0, bool initial = true) {
+			VariantType type = v.get_type ();
+
+			if (type.is_basic ()) {
+				sink.append (v.print (false));
+				return;
+			}
+
+			if (type.equal (VariantType.VARDICT)) {
+				sink.append ("{\n");
+
+				var iter = new VariantIter (v);
+				string key;
+				Variant val;
+				while (iter.next ("{sv}", out key, out val)) {
+					append_indent (depth + 1, sink);
+
+					if ("." in key || "-" in key) {
+						sink
+							.append_c ('"')
+							.append (key)
+							.append_c ('"');
+					} else {
+						sink.append (key);
+					}
+					sink.append (": ");
+
+					print_variant (val, sink, depth + 1, false);
+
+					sink.append (",\n");
+				}
+
+				append_indent (depth, sink);
+				sink.append ("}");
+			} else if (type.is_array ()) {
+				sink.append ("[\n");
+
+				var iter = new VariantIter (v);
+				Variant? val;
+				while ((val = iter.next_value ()) != null) {
+					append_indent (depth + 1, sink);
+					print_variant (val, sink, depth + 1, false);
+					sink.append (",\n");
+				}
+
+				append_indent (depth, sink);
+				sink.append ("]");
+			} else {
+				sink.append (v.print (false));
+			}
+		}
+
+		private static void append_indent (uint depth, StringBuilder sink) {
+			for (uint i = 0; i != depth; i++)
+				sink.append_c ('\t');
 		}
 	}
 
@@ -494,7 +551,33 @@ namespace Frida.XPC {
 		IS_REPLY			= (1 << 1),
 		HEADER_OPENS_STREAM_TX		= (1 << 4),
 		HEADER_OPENS_STREAM_RX		= (1 << 5),
-		HEADER_OPENS_REPLY_CHANNEL	= (1 << 6),
+		HEADER_OPENS_REPLY_CHANNEL	= (1 << 6);
+
+		public string print () {
+			uint remainder = this;
+			if (remainder == 0)
+				return "NONE";
+
+			var result = new StringBuilder.sized (128);
+
+			var klass = (FlagsClass) typeof (MessageFlags).class_ref ();
+			foreach (FlagsValue fv in klass.values) {
+				if ((remainder & fv.value) != 0) {
+					if (result.len != 0)
+						result.append (" | ");
+					result.append (fv.value_nick.up ().replace ("-", "_"));
+					remainder &= ~fv.value;
+				}
+			}
+
+			if (remainder != 0) {
+				if (result.len != 0)
+					result.append (" | ");
+				result.append_printf ("0x%04x", remainder);
+			}
+
+			return result.str;
+		}
 	}
 
 	public class ObjectBuilder {
@@ -640,18 +723,18 @@ namespace Frida.XPC {
 		}
 
 		public Variant read_object () throws Error {
-			var raw_type = read_uint32 ();
+			var raw_type = read_raw_uint32 ();
 			if (object_type_class.get_value ((int) raw_type) == null)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: unsupported type (0x%x)", raw_type);
 			var type = (ObjectType) raw_type;
 
 			switch (type) {
 				case BOOL:
-					return new Variant.boolean (read_uint32 () != 0);
+					return new Variant.boolean (read_raw_uint32 () != 0);
 				case INT64:
-					return new Variant.int64 (read_int64 ());
+					return new Variant.int64 (read_raw_int64 ());
 				case UINT64:
-					return new Variant.uint64 (read_uint64 ());
+					return new Variant.uint64 (read_raw_uint64 ());
 				case STRING:
 					return read_string ();
 				case UUID:
@@ -666,7 +749,7 @@ namespace Frida.XPC {
 		}
 
 		private Variant read_string () throws Error {
-			var size = read_uint32 ();
+			var size = read_raw_uint32 ();
 
 			var str = new Variant.string (buf.read_string (cursor));
 			cursor += size;
@@ -677,16 +760,16 @@ namespace Frida.XPC {
 		}
 
 		private Variant read_uuid () throws Error {
-			Bytes uuid = read_bytes (16);
+			Bytes uuid = read_raw_bytes (16);
 			return Variant.new_from_data (new VariantType ("ay"), uuid.get_data (), true, uuid);
 		}
 
 		private Variant read_array () throws Error {
 			var builder = new VariantBuilder (new VariantType.array (VariantType.VARIANT));
 
-			var size = read_uint32 ();
+			var size = read_raw_uint32 ();
 			size_t num_elements_offset = cursor;
-			var num_elements = read_uint32 ();
+			var num_elements = read_raw_uint32 ();
 
 			for (uint32 i = 0; i != num_elements; i++)
 				builder.add ("v", read_object ());
@@ -700,9 +783,9 @@ namespace Frida.XPC {
 		private Variant read_dictionary () throws Error {
 			var builder = new VariantBuilder (VariantType.VARDICT);
 
-			var size = read_uint32 ();
+			var size = read_raw_uint32 ();
 			size_t num_entries_offset = cursor;
-			var num_entries = read_uint32 ();
+			var num_entries = read_raw_uint32 ();
 
 			for (uint32 i = 0; i != num_entries; i++) {
 				string key = buf.read_string (cursor);
@@ -720,28 +803,28 @@ namespace Frida.XPC {
 			return builder.end ();
 		}
 
-		private uint32 read_uint32 () throws Error {
+		private uint32 read_raw_uint32 () throws Error {
 			check_available (sizeof (uint32));
 			var result = buf.read_uint32 (cursor);
 			cursor += sizeof (uint32);
 			return result;
 		}
 
-		private int64 read_int64 () throws Error {
+		private int64 read_raw_int64 () throws Error {
 			check_available (sizeof (int64));
 			var result = buf.read_int64 (cursor);
 			cursor += sizeof (int64);
 			return result;
 		}
 
-		private uint64 read_uint64 () throws Error {
+		private uint64 read_raw_uint64 () throws Error {
 			check_available (sizeof (uint64));
 			var result = buf.read_uint64 (cursor);
 			cursor += sizeof (uint64);
 			return result;
 		}
 
-		private Bytes read_bytes (size_t n) throws Error {
+		private Bytes read_raw_bytes (size_t n) throws Error {
 			check_available (n);
 			Bytes result = buf.bytes[cursor:cursor + n];
 			cursor += n;
@@ -798,4 +881,3 @@ namespace Frida.XPC {
 			printerr ("%s| %s\n", string.nfill ((16 - (i % 16)) * 3, ' '), builder.str);
 	}
 }
-
