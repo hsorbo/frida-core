@@ -119,8 +119,6 @@ namespace Frida.XPC {
 				yield submit_data (root_stream_id, header_request);
 
 				Bytes ping_request = new RequestBuilder (PING)
-					.begin_dictionary ()
-					.end_dictionary ()
 					.build ();
 				yield submit_data (root_stream_id, ping_request);
 
@@ -128,8 +126,6 @@ namespace Frida.XPC {
 				maybe_send_pending ();
 
 				Bytes open_reply_channel_request = new RequestBuilder (HEADER, HEADER_OPENS_REPLY_CHANNEL)
-					.begin_dictionary ()
-					.end_dictionary ()
 					.build ();
 				yield submit_data (reply_stream_id, open_reply_channel_request);
 			} catch (GLib.Error e) {
