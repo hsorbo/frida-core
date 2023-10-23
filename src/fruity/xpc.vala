@@ -303,8 +303,15 @@ namespace Frida.XPC {
 			if (stream.incoming_message == null)
 				return -1;
 
-			printerr ("Ready to parse:\n");
-			hexdump (stream.incoming_message.data);
+			// printerr ("Ready to parse:\n");
+			// hexdump (stream.incoming_message.data);
+
+			try {
+				var msg = Message.parse (stream.incoming_message.data);
+				printerr ("%s\n", msg.to_string ());
+			} catch (Error e) {
+				printerr ("Failed to parse message: %s\n", e.message);
+			}
 
 			return 0;
 		}
@@ -415,15 +422,15 @@ namespace Frida.XPC {
 			var message_type_class = (EnumClass) typeof (MessageType).class_ref ();
 			if (message_type_class.get_value (raw_message_type) == null)
 				throw new Error.INVALID_ARGUMENT ("Invalid message: unsupported message type (0x%x)", raw_message_type);
-			MessageType message_type = raw_message_type;
+			var message_type = (MessageType) raw_message_type;
 
-			MessageFlags message_flags = buf.read_uint16 (6);
+			MessageFlags message_flags = (MessageFlags) buf.read_uint16 (6);
 
-			Body? body = null;
+			Variant? body = null;
 			uint64 message_size = buf.read_uint64 (8);
 			if (message_size != 0) {
 				if (message_size > MAX_SIZE) {
-					throw new Error.INVALID_ARGUMENT ("Invalid message: too large (%" + int64.FORMAT_MODIFIER "u)",
+					throw new Error.INVALID_ARGUMENT ("Invalid message: too large (%" + int64.FORMAT_MODIFIER + "u)",
 						message_size);
 				}
 				if (data.length - HEADER_SIZE != message_size)
@@ -433,7 +440,7 @@ namespace Frida.XPC {
 
 			uint64 message_id = buf.read_uint64 (16);
 
-			return new Message (type, flags, id, body);
+			return new Message (message_type, message_flags, message_id, body);
 		}
 
 		private Message (MessageType type, MessageFlags flags, uint64 id, Variant? body) {
@@ -442,12 +449,42 @@ namespace Frida.XPC {
 			this.id = id;
 			this.body = body;
 		}
+
+		public string to_string () {
+			var description = new StringBuilder.sized (128);
+
+			description.append_printf (("Message {" +
+					"\n\ttype: %s," +
+					"\n\tflags: 0x%04x," +
+					"\n\tid: %" + int64.FORMAT_MODIFIER + "u,"),
+				type.to_nick (),
+				flags,
+				id);
+
+			if (body != null) {
+				description
+					.append ("\n\tbody: ")
+					.append (body.print (false));
+			}
+
+			description.append ("\n}");
+
+			return description.str;
+		}
 	}
 
 	public enum MessageType {
 		HEADER,
 		MSG,
-		PING,
+		PING;
+
+		public static MessageType from_nick (string nick) throws Error {
+			return Marshal.enum_from_nick<MessageType> (nick);
+		}
+
+		public string to_nick () {
+			return Marshal.enum_to_nick<MessageType> (this);
+		}
 	}
 
 	[Flags]
@@ -564,14 +601,18 @@ namespace Frida.XPC {
 	}
 
 	private enum ObjectType {
-		UINT64     = 0x00004000,
-		STRING     = 0x00009000,
-		DICTIONARY = 0x0000f000,
+		BOOL		= 0x2000,
+		INT64		= 0x3000,
+		UINT64		= 0x4000,
+		STRING		= 0x9000,
+		UUID		= 0xa000,
+		ARRAY		= 0xe000,
+		DICTIONARY	= 0xf000,
 	}
 
 	public class ObjectParser {
 		private Buffer buf;
-		private uint cursor;
+		private size_t cursor;
 		private EnumClass object_type_class;
 
 		public static Variant parse (uint8[] data) throws Error {
@@ -581,7 +622,7 @@ namespace Frida.XPC {
 			var buf = new Buffer (new Bytes.static (data), 8, LITTLE_ENDIAN);
 
 			var magic = buf.read_uint32 (0);
-			if (magic != SerializedObject.$MAGIC)
+			if (magic != SerializedObject.MAGIC)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: bad magic (0x%08x)", magic);
 
 			var version = buf.read_uint8 (4);
@@ -600,17 +641,27 @@ namespace Frida.XPC {
 
 		public Variant read_object () throws Error {
 			var raw_type = read_uint32 ();
-			if (object_type_class.get_value (raw_type) == null)
+			if (object_type_class.get_value ((int) raw_type) == null)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: unsupported type (0x%x)", raw_type);
-			ObjectType type = raw_type;
+			var type = (ObjectType) raw_type;
 
 			switch (type) {
+				case BOOL:
+					return new Variant.boolean (read_uint32 () != 0);
+				case INT64:
+					return new Variant.int64 (read_int64 ());
 				case UINT64:
 					return new Variant.uint64 (read_uint64 ());
 				case STRING:
 					return read_string ();
+				case UUID:
+					return read_uuid ();
+				case ARRAY:
+					return read_array ();
 				case DICTIONARY:
 					return read_dictionary ();
+				default:
+					assert_not_reached ();
 			}
 		}
 
@@ -625,9 +676,32 @@ namespace Frida.XPC {
 			return str;
 		}
 
-		private Variant read_dictionary () throws Error {
+		private Variant read_uuid () throws Error {
+			Bytes uuid = read_bytes (16);
+			return Variant.new_from_data (new VariantType ("ay"), uuid.get_data (), true, uuid);
+		}
+
+		private Variant read_array () throws Error {
+			var builder = new VariantBuilder (new VariantType.array (VariantType.VARIANT));
+
 			var size = read_uint32 ();
-			uint num_entries_offset = cursor;
+			size_t num_elements_offset = cursor;
+			var num_elements = read_uint32 ();
+
+			for (uint32 i = 0; i != num_elements; i++)
+				builder.add ("v", read_object ());
+
+			cursor = num_elements_offset;
+			skip (size);
+
+			return builder.end ();
+		}
+
+		private Variant read_dictionary () throws Error {
+			var builder = new VariantBuilder (VariantType.VARDICT);
+
+			var size = read_uint32 ();
+			size_t num_entries_offset = cursor;
 			var num_entries = read_uint32 ();
 
 			for (uint32 i = 0; i != num_entries; i++) {
@@ -637,17 +711,26 @@ namespace Frida.XPC {
 
 				Variant val = read_object ();
 
-				// TODO
+				builder.add ("{sv}", key, val);
 			}
 
 			cursor = num_entries_offset;
 			skip (size);
+
+			return builder.end ();
 		}
 
 		private uint32 read_uint32 () throws Error {
 			check_available (sizeof (uint32));
 			var result = buf.read_uint32 (cursor);
 			cursor += sizeof (uint32);
+			return result;
+		}
+
+		private int64 read_int64 () throws Error {
+			check_available (sizeof (int64));
+			var result = buf.read_int64 (cursor);
+			cursor += sizeof (int64);
 			return result;
 		}
 
@@ -658,18 +741,25 @@ namespace Frida.XPC {
 			return result;
 		}
 
+		private Bytes read_bytes (size_t n) throws Error {
+			check_available (n);
+			Bytes result = buf.bytes[cursor:cursor + n];
+			cursor += n;
+			return result;
+		}
+
 		private void skip (size_t n) throws Error {
 			check_available (n);
 			cursor += n;
 		}
 
-		private void align (size_t n) {
+		private void align (size_t n) throws Error {
 			size_t remainder = cursor % n;
 			if (remainder != 0)
 				skip (n - remainder);
 		}
 
-		private void check_available (size_t required) {
+		private void check_available (size_t required) throws Error {
 			size_t available = buf.bytes.get_size () - cursor;
 			if (available < required)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: truncated");
