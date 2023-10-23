@@ -340,14 +340,12 @@ namespace Frida.XPC {
 
 			public ByteArray? incoming_message;
 
-			private const size_t MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // TODO: Revisit
-
 			public Stream (int32 id) {
 				this.id = id;
 			}
 
 			public int on_begin_frame (NGHttp2.FrameHd hd) {
-				if (hd.length > MAX_MESSAGE_SIZE)
+				if (hd.length > Message.HEADER_SIZE + Message.MAX_SIZE)
 					return -1;
 				incoming_message = new ByteArray.sized ((uint) hd.length);
 				return 0;
@@ -363,9 +361,6 @@ namespace Frida.XPC {
 	}
 
 	public class RequestBuilder : ObjectBuilder {
-		private const uint32 MAGIC = 0x29b00b92;
-		private const uint8 PROTOCOL_VERSION = 1;
-
 		private MessageType message_type;
 		private MessageFlags message_flags;
 		private uint64 message_id;
@@ -380,14 +375,72 @@ namespace Frida.XPC {
 			Bytes body = base.build ();
 
 			return new BufferBuilder (8, LITTLE_ENDIAN)
-				.append_uint32 (MAGIC)
-				.append_uint8 (PROTOCOL_VERSION)
+				.append_uint32 (Message.MAGIC)
+				.append_uint8 (Message.PROTOCOL_VERSION)
 				.append_uint8 (message_type)
 				.append_uint16 (message_flags)
 				.append_uint64 (body.length)
 				.append_uint64 (message_id)
 				.append_bytes (body)
 				.build ();
+		}
+	}
+
+	public class Message {
+		public MessageType type;
+		public MessageFlags flags;
+		public uint64 id;
+		public Variant? body;
+
+		public const uint32 MAGIC = 0x29b00b92;
+		public const uint8 PROTOCOL_VERSION = 1;
+		public const size_t HEADER_SIZE = 24;
+		public const size_t MAX_SIZE = (128 * 1024 * 1024) - 1;
+
+		public static Message parse (uint8[] data) throws Error {
+			if (data.length < 24)
+				throw new Error.INVALID_ARGUMENT ("Invalid message: truncated");
+
+			var buf = new Buffer (new Bytes.static (data), 8, LITTLE_ENDIAN);
+
+			var magic = buf.read_uint32 (0);
+			if (magic != MAGIC)
+				throw new Error.INVALID_ARGUMENT ("Invalid message: bad magic (0x%08x)", magic);
+
+			var protocol_version = buf.read_uint8 (4);
+			if (protocol_version != PROTOCOL_VERSION)
+				throw new Error.INVALID_ARGUMENT ("Invalid message: unsupported protocol version (%u)", protocol_version);
+
+			var raw_message_type = buf.read_uint8 (5);
+			var message_type_class = (EnumClass) typeof (MessageType).class_ref ();
+			if (message_type_class.get_value (raw_message_type) == null)
+				throw new Error.INVALID_ARGUMENT ("Invalid message: unsupported message type (0x%x)", raw_message_type);
+			MessageType message_type = raw_message_type;
+
+			MessageFlags message_flags = buf.read_uint16 (6);
+
+			Body? body = null;
+			uint64 message_size = buf.read_uint64 (8);
+			if (message_size != 0) {
+				if (message_size > MAX_SIZE) {
+					throw new Error.INVALID_ARGUMENT ("Invalid message: too large (%" + int64.FORMAT_MODIFIER "u)",
+						message_size);
+				}
+				if (data.length - HEADER_SIZE != message_size)
+					throw new Error.INVALID_ARGUMENT ("Invalid message: incorrect message size");
+				body = ObjectParser.parse (data[HEADER_SIZE:]);
+			}
+
+			uint64 message_id = buf.read_uint64 (16);
+
+			return new Message (type, flags, id, body);
+		}
+
+		private Message (MessageType type, MessageFlags flags, uint64 id, Variant? body) {
+			this.type = type;
+			this.flags = flags;
+			this.id = id;
+			this.body = body;
 		}
 	}
 
@@ -411,25 +464,22 @@ namespace Frida.XPC {
 		private BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
 		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
 
-		private const uint32 MAGIC = 0x42133742;
-		private const uint32 VERSION = 5;
-
 		public ObjectBuilder () {
 			builder
-				.append_uint32 (MAGIC)
-				.append_uint32 (VERSION);
+				.append_uint32 (SerializedObject.MAGIC)
+				.append_uint32 (SerializedObject.VERSION);
 		}
 
 		public unowned ObjectBuilder begin_dictionary () {
 			builder.append_uint32 (ObjectType.DICTIONARY);
 
-			size_t length_offset = builder.offset;
+			size_t size_offset = builder.offset;
 			builder.append_uint32 (0);
 
 			size_t num_entries_offset = builder.offset;
 			builder.append_uint32 (0);
 
-			push_scope (new DictionaryScope (length_offset, num_entries_offset));
+			push_scope (new DictionaryScope (size_offset, num_entries_offset));
 
 			return this;
 		}
@@ -437,8 +487,8 @@ namespace Frida.XPC {
 		public unowned ObjectBuilder end_dictionary () {
 			DictionaryScope scope = pop_scope ();
 
-			uint32 length = (uint32) (builder.offset - scope.num_entries_offset);
-			builder.write_uint32 (scope.length_offset, length);
+			uint32 size = (uint32) (builder.offset - scope.num_entries_offset);
+			builder.write_uint32 (scope.size_offset, size);
 
 			builder.write_uint32 (scope.num_entries_offset, scope.num_entries);
 
@@ -455,8 +505,11 @@ namespace Frida.XPC {
 		public unowned ObjectBuilder add_string (string val) {
 			var scope = peek_scope ();
 
-			if (scope.kind != DICTIONARY)
-				builder.append_uint32 (ObjectType.STRING);
+			if (scope.kind != DICTIONARY) {
+				builder
+					.append_uint32 (ObjectType.STRING)
+					.append_uint32 (val.length + 1);
+			}
 
 			builder
 				.append_string (val)
@@ -497,14 +550,14 @@ namespace Frida.XPC {
 		}
 
 		private class DictionaryScope : Scope {
-			public size_t length_offset;
+			public size_t size_offset;
 			public size_t num_entries_offset;
 
 			public uint num_entries = 0;
 
-			public DictionaryScope (size_t length_offset, size_t num_entries_offset) {
+			public DictionaryScope (size_t size_offset, size_t num_entries_offset) {
 				base (DICTIONARY);
-				this.length_offset = length_offset;
+				this.size_offset = size_offset;
 				this.num_entries_offset = num_entries_offset;
 			}
 		}
@@ -514,6 +567,118 @@ namespace Frida.XPC {
 		UINT64     = 0x00004000,
 		STRING     = 0x00009000,
 		DICTIONARY = 0x0000f000,
+	}
+
+	public class ObjectParser {
+		private Buffer buf;
+		private uint cursor;
+		private EnumClass object_type_class;
+
+		public static Variant parse (uint8[] data) throws Error {
+			if (data.length < 12)
+				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: truncated");
+
+			var buf = new Buffer (new Bytes.static (data), 8, LITTLE_ENDIAN);
+
+			var magic = buf.read_uint32 (0);
+			if (magic != SerializedObject.$MAGIC)
+				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: bad magic (0x%08x)", magic);
+
+			var version = buf.read_uint8 (4);
+			if (version != SerializedObject.VERSION)
+				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: unsupported version (%u)", version);
+
+			var parser = new ObjectParser (buf, 8);
+			return parser.read_object ();
+		}
+
+		private ObjectParser (Buffer buf, uint cursor) {
+			this.buf = buf;
+			this.cursor = cursor;
+			this.object_type_class = (EnumClass) typeof (ObjectType).class_ref ();
+		}
+
+		public Variant read_object () throws Error {
+			var raw_type = read_uint32 ();
+			if (object_type_class.get_value (raw_type) == null)
+				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: unsupported type (0x%x)", raw_type);
+			ObjectType type = raw_type;
+
+			switch (type) {
+				case UINT64:
+					return new Variant.uint64 (read_uint64 ());
+				case STRING:
+					return read_string ();
+				case DICTIONARY:
+					return read_dictionary ();
+			}
+		}
+
+		private Variant read_string () throws Error {
+			var size = read_uint32 ();
+
+			var str = new Variant.string (buf.read_string (cursor));
+			cursor += size;
+
+			align (4);
+
+			return str;
+		}
+
+		private Variant read_dictionary () throws Error {
+			var size = read_uint32 ();
+			uint num_entries_offset = cursor;
+			var num_entries = read_uint32 ();
+
+			for (uint32 i = 0; i != num_entries; i++) {
+				string key = buf.read_string (cursor);
+				skip (key.length + 1);
+				align (4);
+
+				Variant val = read_object ();
+
+				// TODO
+			}
+
+			cursor = num_entries_offset;
+			skip (size);
+		}
+
+		private uint32 read_uint32 () throws Error {
+			check_available (sizeof (uint32));
+			var result = buf.read_uint32 (cursor);
+			cursor += sizeof (uint32);
+			return result;
+		}
+
+		private uint64 read_uint64 () throws Error {
+			check_available (sizeof (uint64));
+			var result = buf.read_uint64 (cursor);
+			cursor += sizeof (uint64);
+			return result;
+		}
+
+		private void skip (size_t n) throws Error {
+			check_available (n);
+			cursor += n;
+		}
+
+		private void align (size_t n) {
+			size_t remainder = cursor % n;
+			if (remainder != 0)
+				skip (n - remainder);
+		}
+
+		private void check_available (size_t required) {
+			size_t available = buf.bytes.get_size () - cursor;
+			if (available < required)
+				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: truncated");
+		}
+	}
+
+	namespace SerializedObject {
+		public const uint32 MAGIC = 0x42133742;
+		public const uint32 VERSION = 5;
 	}
 
 	// https://gist.github.com/phako/96b36b5070beaf7eee27
