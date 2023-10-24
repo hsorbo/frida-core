@@ -62,6 +62,14 @@ namespace Frida.XPC {
 				ServiceConnection * self = user_data;
 				return self->on_send (data, flags);
 			});
+			callbacks.set_on_frame_send_callback ((session, frame, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_frame_send (frame);
+			});
+			callbacks.set_on_frame_not_send_callback ((session, frame, lib_error_code, user_data) => {
+				ServiceConnection * self = user_data;
+				return self->on_frame_not_send (frame, lib_error_code);
+			});
 			callbacks.set_on_begin_frame_callback ((session, hd, user_data) => {
 				ServiceConnection * self = user_data;
 				return self->on_begin_frame (hd);
@@ -126,17 +134,17 @@ namespace Frida.XPC {
 					.begin_dictionary ()
 					.end_dictionary ()
 					.build ();
-				yield submit_data (root_stream.id, header_request);
+				yield root_stream.submit_data (header_request);
 
 				Bytes ping_request = new RequestBuilder (PING)
 					.build ();
-				yield submit_data (root_stream.id, ping_request);
+				yield root_stream.submit_data (ping_request);
 
 				reply_stream = make_stream ();
 
 				Bytes open_reply_channel_request = new RequestBuilder (HEADER, HEADER_OPENS_REPLY_CHANNEL)
 					.build ();
-				yield submit_data (reply_stream.id, open_reply_channel_request);
+				yield reply_stream.submit_data (open_reply_channel_request);
 
 				Bytes handshake = new RequestBuilder (MSG, NONE, make_message_id ())
 					.begin_dictionary ()
@@ -154,7 +162,7 @@ namespace Frida.XPC {
 						.end_dictionary ()
 					.end_dictionary ()
 					.build ();
-				yield submit_data (root_stream.id, handshake);
+				yield root_stream.submit_data (handshake);
 
 				var source = new TimeoutSource.seconds (2);
 				source.set_callback (() => {
@@ -180,70 +188,6 @@ namespace Frida.XPC {
 			}
 		}
 
-		private async void submit_data (int32 stream_id, Bytes bytes) throws Error, IOError {
-			try {
-				var msg = Message.parse (bytes.get_data ());
-				printerr (">>> [stream_id=%d] %s\n", stream_id, msg.to_string ());
-			} catch (Error e) {
-				printerr ("Failed to parse message: %s\n", e.message);
-			}
-
-			bool waiting = false;
-			var op = new SubmitOperation (bytes, () => {
-				if (waiting)
-					submit_data.callback ();
-				return Source.REMOVE;
-			});
-
-			var data_prd = NGHttp2.DataProvider ();
-			data_prd.source.ptr = op;
-			data_prd.read_callback = on_data_provider_read;
-			int result = session.submit_data (NGHttp2.DataFlag.NO_END_STREAM, stream_id, data_prd);
-			if (result < 0)
-				throw new Error.PROTOCOL ("%s", NGHttp2.strerror (result));
-
-			maybe_send_pending ();
-
-			while (op.cursor != bytes.get_size ()) {
-				waiting = true;
-				yield;
-				waiting = false;
-			}
-		}
-
-		private static ssize_t on_data_provider_read (NGHttp2.Session session, int32 stream_id, uint8[] buf, ref uint32 data_flags,
-				NGHttp2.DataSource source, void * user_data) {
-			var op = (SubmitOperation) source.ptr;
-
-			unowned uint8[] data = op.bytes.get_data ();
-
-			uint remaining = data.length - op.cursor;
-			if (remaining == 0) {
-				data_flags |= NGHttp2.DataFlag.EOF;
-				op.callback ();
-				return 0;
-			}
-
-			uint n = uint.min (remaining, buf.length);
-			Memory.copy (buf, (uint8 *) data + op.cursor, n);
-
-			op.cursor += n;
-
-			return n;
-		}
-
-		private class SubmitOperation {
-			public Bytes bytes;
-			public SourceFunc callback;
-
-			public uint cursor = 0;
-
-			public SubmitOperation (Bytes bytes, owned SourceFunc callback) {
-				this.bytes = bytes;
-				this.callback = (owned) callback;
-			}
-		}
-
 		private async void process_incoming_messages () {
 			while (is_processing_messages) {
 				try {
@@ -255,6 +199,10 @@ namespace Frida.XPC {
 						is_processing_messages = false;
 						continue;
 					}
+
+					printerr ("\n=== Received:\n");
+					hexdump (buffer[:n]);
+					printerr ("===\n\n");
 
 					ssize_t result = session.mem_recv (buffer[:n]);
 					if (result < 0)
@@ -293,6 +241,10 @@ namespace Frida.XPC {
 			send_queue = null;
 
 			try {
+				printerr ("\n=== Sending:\n");
+				hexdump (buffer);
+				printerr ("===\n\n");
+
 				size_t bytes_written;
 				yield output.write_all_async (buffer, Priority.DEFAULT, io_cancellable, out bytes_written);
 			} catch (GLib.Error e) {
@@ -314,71 +266,52 @@ namespace Frida.XPC {
 						.add_uint64_value (next_heartbeat_seqno++)
 					.end_dictionary ()
 					.build ();
-				yield submit_data (root_stream.id, heartbeat);
+				yield root_stream.submit_data (heartbeat);
 			} catch (GLib.Error e) {
 				printerr ("send_heartbeat() failed: %s\n", e.message);
 			}
 		}
 
+		private int on_frame_send (NGHttp2.Frame frame) {
+			if (frame.hd.type == DATA) {
+				printerr ("on_frame_send() frame=%p\n", (void *) &frame);
+				find_stream_by_id (frame.hd.stream_id).on_data_frame_send ();
+			}
+			return 0;
+		}
+
+		private int on_frame_not_send (NGHttp2.Frame frame, NGHttp2.ErrorCode lib_error_code) {
+			if (frame.hd.type == DATA)
+				find_stream_by_id (frame.hd.stream_id).on_data_frame_not_send (lib_error_code);
+			return 0;
+		}
+
 		private int on_begin_frame (NGHttp2.FrameHd hd) {
-			if (hd.type != DATA)
-				return 0;
-
-			Stream? stream = find_stream_by_id (hd.stream_id);
-			if (stream == null)
-				return -1;
-
-			return stream.on_begin_frame (hd);
+			if (hd.type == DATA) {
+				Stream? stream = find_stream_by_id (hd.stream_id);
+				if (stream != null)
+					return stream.on_data_frame_recv_begin (hd);
+			}
+			return 0;
 		}
 
 		private int on_data_chunk_recv (uint8 flags, int32 stream_id, uint8[] data) {
-			Stream? stream = find_stream_by_id (stream_id);
-			if (stream == null)
-				return -1;
-
-			return stream.on_data_chunk_recv (data);
+			return find_stream_by_id (stream_id).on_data_frame_recv_chunk (data);
 		}
 
 		private int on_frame_recv (NGHttp2.Frame frame) {
-			if (frame.hd.type != DATA)
-				return 0;
-
-			Stream? stream = find_stream_by_id (frame.hd.stream_id);
-			if (stream == null)
-				return -1;
-
-			if (stream.incoming_message == null)
-				return -1;
-
-			// printerr ("Ready to parse:\n");
-			// hexdump (stream.incoming_message.data);
-
-			Message msg;
-			try {
-				msg = Message.parse (stream.incoming_message.data);
-				printerr ("<<< [stream_id=%d] %s\n", frame.hd.stream_id, msg.to_string ());
-			} catch (Error e) {
-				printerr ("Failed to parse message: %s\n", e.message);
-				return -1;
-			}
-
-			if (msg.type == MSG) {
-				if (msg.body == null || !msg.body.get_type ().equal (VariantType.VARDICT))
-					return -1;
-
-				var dict = new VariantDict (msg.body);
-				string message_type;
-				if (!dict.lookup ("MessageType", "s", out message_type))
-					return 0;
-
-				printerr ("Got message type: \"%s\"\n", message_type);
-			}
-
+			if (frame.hd.type == DATA)
+				return find_stream_by_id (frame.hd.stream_id).on_data_frame_recv_end (frame);
 			return 0;
 		}
 
 		private int on_stream_close (int32 stream_id, uint32 error_code) {
 			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
+			if (heartbeat_source != null) {
+				heartbeat_source.destroy ();
+				heartbeat_source = null;
+			}
+
 			return 0;
 		}
 
@@ -392,7 +325,7 @@ namespace Frida.XPC {
 			int stream_id = session.submit_headers (NGHttp2.Flag.NONE, -1, null, {}, null);
 			maybe_send_pending ();
 
-			return new Stream (stream_id);
+			return new Stream (this, stream_id);
 		}
 
 		private Stream? find_stream_by_id (int32 id) {
@@ -412,23 +345,180 @@ namespace Frida.XPC {
 		private class Stream {
 			public int32 id;
 
-			public ByteArray? incoming_message;
+			private weak ServiceConnection parent;
 
-			public Stream (int32 id) {
+			private Gee.Deque<SubmitOperation> submissions = new Gee.ArrayQueue<SubmitOperation> ();
+			private SubmitOperation? current_submission = null;
+			private ByteArray? incoming_message;
+
+			public Stream (ServiceConnection parent, int32 id) {
+				this.parent = parent;
 				this.id = id;
 			}
 
-			public int on_begin_frame (NGHttp2.FrameHd hd) {
+			public async void submit_data (Bytes bytes) throws Error, IOError {
+				try {
+					var msg = Message.parse (bytes.get_data ());
+					printerr (">>> [stream_id=%d] %s\n", id, msg.to_string ());
+				} catch (Error e) {
+					printerr ("Failed to parse message: %s\n", e.message);
+				}
+
+				bool waiting = false;
+				var op = new SubmitOperation (bytes, () => {
+					if (waiting)
+						submit_data.callback ();
+					return Source.REMOVE;
+				});
+
+				submissions.offer_tail (op);
+				maybe_submit_data ();
+
+				if (op.state < SubmitOperation.State.SUBMITTED) {
+					waiting = true;
+					yield;
+					waiting = false;
+				}
+
+				if (op.state == ERROR)
+					throw new Error.TRANSPORT ("%s", NGHttp2.strerror (op.error_code));
+			}
+
+			private void maybe_submit_data () {
+				if (current_submission != null)
+					return;
+
+				SubmitOperation? op = submissions.peek_head ();
+				if (op == null)
+					return;
+				current_submission = op;
+
+				var data_prd = NGHttp2.DataProvider ();
+				data_prd.source.ptr = op;
+				data_prd.read_callback = on_data_provider_read;
+				printerr ("submit_data()\n");
+				int result = parent.session.submit_data (NGHttp2.DataFlag.NO_END_STREAM, id, data_prd);
+				if (result < 0) {
+					printerr ("OH NO\n");
+					while (true) {
+						op = submissions.poll_head ();
+						if (op == null)
+							break;
+						op.state = ERROR;
+						op.error_code = (NGHttp2.ErrorCode) result;
+						op.callback ();
+					}
+					current_submission = null;
+					return;
+				}
+
+				parent.maybe_send_pending ();
+			}
+
+			private static ssize_t on_data_provider_read (NGHttp2.Session session, int32 stream_id, uint8[] buf,
+					ref uint32 data_flags, NGHttp2.DataSource source, void * user_data) {
+				var op = (SubmitOperation) source.ptr;
+
+				unowned uint8[] data = op.bytes.get_data ();
+
+				uint remaining = data.length - op.cursor;
+				if (remaining == 0) {
+					data_flags |= NGHttp2.DataFlag.EOF;
+					return 0;
+				}
+
+				uint n = uint.min (remaining, buf.length);
+				Memory.copy (buf, (uint8 *) data + op.cursor, n);
+
+				op.cursor += n;
+
+				return n;
+			}
+
+			public void on_data_frame_send () {
+				SubmitOperation op = submissions.poll_head ();
+				printerr ("on_data_frame_send(), op=%p\n", op);
+				op.state = SUBMITTED;
+				op.callback ();
+				current_submission = null;
+
+				maybe_submit_data ();
+			}
+
+			public void on_data_frame_not_send (NGHttp2.ErrorCode lib_error_code) {
+				SubmitOperation op = submissions.poll_head ();
+				printerr ("on_data_frame_not_send(), op=%p\n", op);
+				op.state = ERROR;
+				op.error_code = lib_error_code;
+				op.callback ();
+				current_submission = null;
+
+				maybe_submit_data ();
+			}
+
+			private class SubmitOperation {
+				public Bytes bytes;
+				public SourceFunc callback;
+
+				public State state = PENDING;
+				public NGHttp2.ErrorCode error_code;
+				public uint cursor = 0;
+
+				public enum State {
+					PENDING,
+					SUBMITTING,
+					SUBMITTED,
+					ERROR,
+				}
+
+				public SubmitOperation (Bytes bytes, owned SourceFunc callback) {
+					this.bytes = bytes;
+					this.callback = (owned) callback;
+				}
+			}
+
+			public int on_data_frame_recv_begin (NGHttp2.FrameHd hd) {
 				if (hd.length > Message.HEADER_SIZE + Message.MAX_SIZE)
 					return -1;
 				incoming_message = new ByteArray.sized ((uint) hd.length);
 				return 0;
 			}
 
-			public int on_data_chunk_recv (uint8[] data) {
+			public int on_data_frame_recv_chunk (uint8[] data) {
 				if (incoming_message == null)
 					return -1;
 				incoming_message.append (data);
+				return 0;
+			}
+
+			public int on_data_frame_recv_end (NGHttp2.Frame frame) {
+				if (incoming_message == null)
+					return -1;
+
+				// printerr ("Ready to parse:\n");
+				// hexdump (incoming_message.data);
+
+				Message msg;
+				try {
+					msg = Message.parse (incoming_message.data);
+					printerr ("<<< [stream_id=%d] %s\n", frame.hd.stream_id, msg.to_string ());
+				} catch (Error e) {
+					printerr ("Failed to parse message: %s\n", e.message);
+					return -1;
+				}
+
+				if (msg.type == MSG) {
+					if (msg.body == null || !msg.body.get_type ().equal (VariantType.VARDICT))
+						return -1;
+
+					var dict = new VariantDict (msg.body);
+					string message_type;
+					if (!dict.lookup ("MessageType", "s", out message_type))
+						return 0;
+
+					printerr ("Got message type: \"%s\"\n", message_type);
+				}
+
 				return 0;
 			}
 		}
