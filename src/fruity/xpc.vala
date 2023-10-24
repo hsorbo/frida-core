@@ -41,6 +41,9 @@ namespace Frida.XPC {
 
 		private Stream root_stream;
 		private Stream reply_stream;
+		private uint next_message_id = 1;
+		private Source? heartbeat_source;
+		private uint64 next_heartbeat_seqno = 1;
 
 		private bool is_processing_messages;
 
@@ -134,6 +137,32 @@ namespace Frida.XPC {
 				Bytes open_reply_channel_request = new RequestBuilder (HEADER, HEADER_OPENS_REPLY_CHANNEL)
 					.build ();
 				yield submit_data (reply_stream.id, open_reply_channel_request);
+
+				Bytes handshake = new RequestBuilder (MSG, NONE, make_message_id ())
+					.begin_dictionary ()
+						.set_member_name ("MessageType")
+						.add_string_value ("Handshake")
+						.set_member_name ("UUID")
+						.add_uuid_value ("83CD038D-04B8-4E6F-A7CA-A715A43BAFE2") // FIXME
+						.set_member_name ("MessagingProtocolVersion")
+						.add_uint64_value (3)
+						.set_member_name ("Services")
+						.begin_dictionary ()
+						.end_dictionary ()
+						.set_member_name ("Properties")
+						.begin_dictionary ()
+						.end_dictionary ()
+					.end_dictionary ()
+					.build ();
+				yield submit_data (root_stream.id, handshake);
+
+				var source = new TimeoutSource.seconds (2);
+				source.set_callback (() => {
+					send_heartbeat.begin ();
+					return Source.CONTINUE;
+				});
+				source.attach (MainContext.get_thread_default ());
+				heartbeat_source = source;
 			} catch (GLib.Error e) {
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
@@ -152,6 +181,13 @@ namespace Frida.XPC {
 		}
 
 		private async void submit_data (int32 stream_id, Bytes bytes) throws Error, IOError {
+			try {
+				var msg = Message.parse (bytes.get_data ());
+				printerr (">>> [stream_id=%d] %s\n", stream_id, msg.to_string ());
+			} catch (Error e) {
+				printerr ("Failed to parse message: %s\n", e.message);
+			}
+
 			bool waiting = false;
 			var op = new SubmitOperation (bytes, () => {
 				if (waiting)
@@ -268,8 +304,23 @@ namespace Frida.XPC {
 			maybe_send_pending ();
 		}
 
+		private async void send_heartbeat () {
+			try {
+				Bytes heartbeat = new RequestBuilder (MSG, WANTS_REPLY, make_message_id ())
+					.begin_dictionary ()
+						.set_member_name ("MessageType")
+						.add_string_value ("Heartbeat")
+						.set_member_name ("SequenceNumber")
+						.add_uint64_value (next_heartbeat_seqno++)
+					.end_dictionary ()
+					.build ();
+				yield submit_data (root_stream.id, heartbeat);
+			} catch (GLib.Error e) {
+				printerr ("send_heartbeat() failed: %s\n", e.message);
+			}
+		}
+
 		private int on_begin_frame (NGHttp2.FrameHd hd) {
-			printerr ("\non_begin_frame() length=%zu stream_id=%d type=%u flags=0x%x reserved=%u\n", hd.length, hd.stream_id, hd.type, hd.flags, hd.reserved);
 			if (hd.type != DATA)
 				return 0;
 
@@ -281,8 +332,6 @@ namespace Frida.XPC {
 		}
 
 		private int on_data_chunk_recv (uint8 flags, int32 stream_id, uint8[] data) {
-			printerr ("on_data_chunk_recv() flags=0x%x stream_id=%d\n", flags, stream_id);
-
 			Stream? stream = find_stream_by_id (stream_id);
 			if (stream == null)
 				return -1;
@@ -291,8 +340,6 @@ namespace Frida.XPC {
 		}
 
 		private int on_frame_recv (NGHttp2.Frame frame) {
-			printerr ("on_frame_recv() length=%zu stream_id=%d type=%u flags=0x%x reserved=%u\n", frame.hd.length, frame.hd.stream_id, frame.hd.type, frame.hd.flags, frame.hd.reserved);
-
 			if (frame.hd.type != DATA)
 				return 0;
 
@@ -306,11 +353,25 @@ namespace Frida.XPC {
 			// printerr ("Ready to parse:\n");
 			// hexdump (stream.incoming_message.data);
 
+			Message msg;
 			try {
-				var msg = Message.parse (stream.incoming_message.data);
-				printerr ("%s\n", msg.to_string ());
+				msg = Message.parse (stream.incoming_message.data);
+				printerr ("<<< [stream_id=%d] %s\n", frame.hd.stream_id, msg.to_string ());
 			} catch (Error e) {
 				printerr ("Failed to parse message: %s\n", e.message);
+				return -1;
+			}
+
+			if (msg.type == MSG) {
+				if (msg.body == null || !msg.body.get_type ().equal (VariantType.VARDICT))
+					return -1;
+
+				var dict = new VariantDict (msg.body);
+				string message_type;
+				if (!dict.lookup ("MessageType", "s", out message_type))
+					return 0;
+
+				printerr ("Got message type: \"%s\"\n", message_type);
 			}
 
 			return 0;
@@ -340,6 +401,12 @@ namespace Frida.XPC {
 			if (reply_stream.id == id)
 				return reply_stream;
 			return null;
+		}
+
+		private uint make_message_id () {
+			uint id = next_message_id;
+			next_message_id += 2;
+			return id;
 		}
 
 		private class Stream {
@@ -604,6 +671,18 @@ namespace Frida.XPC {
 			return this;
 		}
 
+		public unowned ObjectBuilder set_member_name (string name) {
+			var scope = (DictionaryScope) peek_scope ();
+
+			builder
+				.append_string (name)
+				.align (4);
+
+			scope.num_entries++;
+
+			return this;
+		}
+
 		public unowned ObjectBuilder end_dictionary () {
 			DictionaryScope scope = pop_scope ();
 
@@ -615,33 +694,45 @@ namespace Frida.XPC {
 			return this;
 		}
 
-		public unowned ObjectBuilder add_uint64 (uint64 val) {
+		public unowned ObjectBuilder add_uint64_value (uint64 val) {
 			builder
 				.append_uint32 (ObjectType.UINT64)
 				.append_uint64 (val);
 			return this;
 		}
 
-		public unowned ObjectBuilder add_string (string val) {
-			var scope = peek_scope ();
-
-			if (scope.kind != DICTIONARY) {
-				builder
-					.append_uint32 (ObjectType.STRING)
-					.append_uint32 (val.length + 1);
-			}
-
+		public unowned ObjectBuilder add_string_value (string val) {
 			builder
+				.append_uint32 (ObjectType.STRING)
+				.append_uint32 (val.length + 1)
 				.append_string (val)
 				.align (4);
+			return this;
+		}
 
-			if (scope.kind == DICTIONARY)
-				((DictionaryScope) scope).num_entries++;
+		public unowned ObjectBuilder add_uuid_value (string val) {
+			var uuid = new ByteArray.sized (16);
+			int len = val.length;
+			for (int i = 0; i != len;) {
+				if (val[i] == '-') {
+					i++;
+					continue;
+				}
+				var byte = (uint8) uint.parse (val[i:i + 2], 16);
+				uuid.append ({ byte });
+				i += 2;
+			}
+			assert (uuid.len == 16);
 
+			builder
+				.append_uint32 (ObjectType.UUID)
+				.append_data (uuid.data);
 			return this;
 		}
 
 		public virtual Bytes build () {
+			if (builder.offset == 8)
+				return new Bytes ({});
 			return builder.build ();
 		}
 
@@ -760,8 +851,13 @@ namespace Frida.XPC {
 		}
 
 		private Variant read_uuid () throws Error {
-			Bytes uuid = read_raw_bytes (16);
-			return Variant.new_from_data (new VariantType ("ay"), uuid.get_data (), true, uuid);
+			uint8[] uuid = read_raw_bytes (16).get_data ();
+			return new Variant.string ("%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X".printf (
+				uuid[0], uuid[1], uuid[2], uuid[3],
+				uuid[4], uuid[5],
+				uuid[6], uuid[7],
+				uuid[8], uuid[9],
+				uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]));
 		}
 
 		private Variant read_array () throws Error {
