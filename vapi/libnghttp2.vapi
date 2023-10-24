@@ -48,6 +48,9 @@ namespace NGHttp2 {
 		public void set_send_callback (SendCallback callback);
 		public void set_on_frame_recv_callback (OnFrameRecvCallback callback);
 		public void set_on_data_chunk_recv_callback (OnDataChunkRecvCallback callback);
+		public void set_before_frame_send_callback (BeforeFrameSendCallback callback);
+		public void set_on_frame_send_callback (OnFrameSendCallback callback);
+		public void set_on_frame_not_send_callback (OnFrameNotSendCallback callback);
 		public void set_on_stream_close_callback (OnStreamCloseCallback callback);
 		public void set_on_begin_frame_callback (OnBeginFrameCallback callback);
 		[CCode (cname = "nghttp2_session_callbacks_set_error_callback2")]
@@ -64,6 +67,15 @@ namespace NGHttp2 {
 	[CCode (cname = "nghttp2_on_data_chunk_recv_callback", has_target = false)]
 	public delegate int OnDataChunkRecvCallback (Session session, uint8 flags, int32 stream_id,
 		[CCode (array_length_type = "size_t")] uint8[] data, void * user_data);
+
+	[CCode (cname = "nghttp2_before_frame_send_callback", has_target = false)]
+	public delegate int BeforeFrameSendCallback (Session session, Frame frame, void * user_data);
+
+	[CCode (cname = "nghttp2_on_frame_send_callback", has_target = false)]
+	public delegate int OnFrameSendCallback (Session session, Frame frame, void * user_data);
+
+	[CCode (cname = "nghttp2_on_frame_not_send_callback", has_target = false)]
+	public delegate int OnFrameNotSendCallback (Session session, Frame frame, ErrorCode lib_error_code, void * user_data);
 
 	[CCode (cname = "nghttp2_on_stream_close_callback", has_target = false)]
 	public delegate int OnStreamCloseCallback (Session session, int32 stream_id, uint32 error_code, void * user_data);
