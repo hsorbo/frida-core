@@ -979,10 +979,12 @@ namespace Frida.XPC {
 			builder
 				.append_uint32 (SerializedObject.MAGIC)
 				.append_uint32 (SerializedObject.VERSION);
+
+			push_scope (new Scope (ROOT));
 		}
 
 		public unowned ObjectBuilder begin_dictionary () {
-			builder.append_uint32 (ObjectType.DICTIONARY);
+			begin_object (DICTIONARY);
 
 			size_t size_offset = builder.offset;
 			builder.append_uint32 (0);
@@ -1002,8 +1004,6 @@ namespace Frida.XPC {
 				.append_string (name)
 				.align (4);
 
-			scope.num_entries++;
-
 			return this;
 		}
 
@@ -1013,21 +1013,53 @@ namespace Frida.XPC {
 			uint32 size = (uint32) (builder.offset - scope.num_entries_offset);
 			builder.write_uint32 (scope.size_offset, size);
 
-			builder.write_uint32 (scope.num_entries_offset, scope.num_entries);
+			builder.write_uint32 (scope.num_entries_offset, scope.num_objects);
 
+			return this;
+		}
+
+		public unowned ObjectBuilder begin_array () {
+			begin_object (ARRAY);
+
+			size_t size_offset = builder.offset;
+			builder.append_uint32 (0);
+
+			size_t num_elements_offset = builder.offset;
+			builder.append_uint32 (0);
+
+			push_scope (new ArrayScope (size_offset, num_elements_offset));
+
+			return this;
+		}
+
+		public unowned ObjectBuilder end_array () {
+			ArrayScope scope = pop_scope ();
+
+			uint32 size = (uint32) (builder.offset - scope.num_elements_offset);
+			builder.write_uint32 (scope.size_offset, size);
+
+			builder.write_uint32 (scope.num_elements_offset, scope.num_objects);
+
+			return this;
+		}
+
+		public unowned ObjectBuilder add_null_value () {
+			begin_object (NULL);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_int64_value (int64 val) {
+			begin_object (INT64).append_int64 (val);
 			return this;
 		}
 
 		public unowned ObjectBuilder add_uint64_value (uint64 val) {
-			builder
-				.append_uint32 (ObjectType.UINT64)
-				.append_uint64 (val);
+			begin_object (UINT64).append_uint64 (val);
 			return this;
 		}
 
 		public unowned ObjectBuilder add_string_value (string val) {
-			builder
-				.append_uint32 (ObjectType.STRING)
+			begin_object (STRING)
 				.append_uint32 (val.length + 1)
 				.append_string (val)
 				.align (4);
@@ -1048,10 +1080,13 @@ namespace Frida.XPC {
 			}
 			assert (uuid.len == 16);
 
-			builder
-				.append_uint32 (ObjectType.UUID)
-				.append_data (uuid.data);
+			begin_object (UUID).append_data (uuid.data);
 			return this;
+		}
+
+		private unowned BufferBuilder begin_object (ObjectType type) {
+			peek_scope ().num_objects++;
+			return builder.append_uint32 (type);
 		}
 
 		public Bytes build () {
@@ -1072,9 +1107,12 @@ namespace Frida.XPC {
 
 		private class Scope {
 			public Kind kind;
+			public uint32 num_objects = 0;
 
 			public enum Kind {
+				ROOT,
 				DICTIONARY,
+				ARRAY,
 			}
 
 			public Scope (Kind kind) {
@@ -1086,20 +1124,31 @@ namespace Frida.XPC {
 			public size_t size_offset;
 			public size_t num_entries_offset;
 
-			public uint num_entries = 0;
-
 			public DictionaryScope (size_t size_offset, size_t num_entries_offset) {
 				base (DICTIONARY);
 				this.size_offset = size_offset;
 				this.num_entries_offset = num_entries_offset;
 			}
 		}
+
+		private class ArrayScope : Scope {
+			public size_t size_offset;
+			public size_t num_elements_offset;
+
+			public ArrayScope (size_t size_offset, size_t num_elements_offset) {
+				base (DICTIONARY);
+				this.size_offset = size_offset;
+				this.num_elements_offset = num_elements_offset;
+			}
+		}
 	}
 
 	private enum ObjectType {
+		NULL		= 0x1000,
 		BOOL		= 0x2000,
 		INT64		= 0x3000,
 		UINT64		= 0x4000,
+		DATA		= 0x8000,
 		STRING		= 0x9000,
 		UUID		= 0xa000,
 		ARRAY		= 0xe000,
@@ -1142,12 +1191,16 @@ namespace Frida.XPC {
 			var type = (ObjectType) raw_type;
 
 			switch (type) {
+				case NULL:
+					return new Variant.maybe (VariantType.VARIANT, null);
 				case BOOL:
 					return new Variant.boolean (read_raw_uint32 () != 0);
 				case INT64:
 					return new Variant.int64 (read_raw_int64 ());
 				case UINT64:
 					return new Variant.uint64 (read_raw_uint64 ());
+				case DATA:
+					return read_data ();
 				case STRING:
 					return read_string ();
 				case UUID:
@@ -1161,15 +1214,23 @@ namespace Frida.XPC {
 			}
 		}
 
+		private Variant read_data () throws Error {
+			var size = read_raw_uint32 ();
+
+			var bytes = read_raw_bytes (size);
+			align (4);
+
+			return Variant.new_from_data (new VariantType ("ay"), bytes.get_data (), true, bytes);
+		}
+
 		private Variant read_string () throws Error {
 			var size = read_raw_uint32 ();
 
-			var str = new Variant.string (buf.read_string (cursor));
+			var str = buf.read_string (cursor);
 			cursor += size;
-
 			align (4);
 
-			return str;
+			return new Variant.string (str);
 		}
 
 		private Variant read_uuid () throws Error {
