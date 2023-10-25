@@ -22,7 +22,7 @@ namespace Frida.XPC {
 			var app_service = yield AppService.open (ep);
 			printerr ("Yay, got AppService!\n");
 
-			yield app_service.request (new ObjectBuilder ()
+			var response = yield app_service.request (new ObjectBuilder ()
 							.begin_dictionary ()
 								.set_member_name ("CoreDevice.featureIdentifier")
 								.add_string_value ("com.apple.coredevice.feature.listprocesses")
@@ -54,6 +54,7 @@ namespace Frida.XPC {
 								.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
 							.end_dictionary ()
 						.build ());
+			printerr ("Got response: %s\n", response.to_string ());
 
 			yield;
 		} catch (Error e) {

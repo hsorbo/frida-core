@@ -93,7 +93,6 @@ namespace Frida.XPC {
 			try {
 				reader.read_member ("MessageType");
 				unowned string message_type = reader.get_string_value ();
-				printerr ("Got message type: \"%s\"\n", message_type);
 
 				if (message_type == "Handshake")
 					handshake_promise.resolve (msg.body);
@@ -197,10 +196,6 @@ namespace Frida.XPC {
 			callbacks.set_on_frame_not_send_callback ((session, frame, lib_error_code, user_data) => {
 				ServiceConnection * self = user_data;
 				return self->on_frame_not_send (frame, lib_error_code);
-			});
-			callbacks.set_on_begin_frame_callback ((session, hd, user_data) => {
-				ServiceConnection * self = user_data;
-				return self->on_begin_frame (hd);
 			});
 			callbacks.set_on_data_chunk_recv_callback ((session, flags, stream_id, data, user_data) => {
 				ServiceConnection * self = user_data;
@@ -479,15 +474,6 @@ namespace Frida.XPC {
 			return 0;
 		}
 
-		private int on_begin_frame (NGHttp2.FrameHd hd) {
-			if (hd.type == DATA) {
-				Stream? stream = find_stream_by_id (hd.stream_id);
-				if (stream != null)
-					return stream.on_data_frame_recv_begin (hd);
-			}
-			return 0;
-		}
-
 		private int on_data_chunk_recv (uint8 flags, int32 stream_id, uint8[] data) {
 			return find_stream_by_id (stream_id).on_data_frame_recv_chunk (data);
 		}
@@ -539,7 +525,7 @@ namespace Frida.XPC {
 
 			private Gee.Deque<SubmitOperation> submissions = new Gee.ArrayQueue<SubmitOperation> ();
 			private SubmitOperation? current_submission = null;
-			private ByteArray? incoming_message;
+			private ByteArray incoming_message = new ByteArray ();
 
 			public Stream (ServiceConnection parent, int32 id) {
 				this.parent = parent;
@@ -681,35 +667,25 @@ namespace Frida.XPC {
 				}
 			}
 
-			public int on_data_frame_recv_begin (NGHttp2.FrameHd hd) {
-				if (hd.length > Message.HEADER_SIZE + Message.MAX_SIZE)
-					return -1;
-				incoming_message = new ByteArray.sized ((uint) hd.length);
-				return 0;
-			}
-
 			public int on_data_frame_recv_chunk (uint8[] data) {
-				if (incoming_message == null)
-					return -1;
 				incoming_message.append (data);
 				return 0;
 			}
 
 			public int on_data_frame_recv_end (NGHttp2.Frame frame) {
-				if (incoming_message == null)
-					return -1;
-
-				// printerr ("Ready to parse:\n");
-				// hexdump (incoming_message.data);
-
-				Message msg;
+				Message? msg;
+				size_t size;
 				try {
-					msg = Message.parse (incoming_message.data);
-					printerr ("<<< [stream_id=%d] %s\n", frame.hd.stream_id, msg.to_string ());
+					msg = Message.try_parse (incoming_message.data, out size);
 				} catch (Error e) {
 					printerr ("Failed to parse message: %s\n", e.message);
 					return -1;
 				}
+				if (msg == null)
+					return 0;
+				incoming_message.remove_range (0, (uint) size);
+
+				printerr ("<<< [stream_id=%d] %s\n", frame.hd.stream_id, msg.to_string ());
 
 				if (msg.type == MSG) {
 					if ((msg.flags & MessageFlags.IS_REPLY) != 0)
@@ -796,8 +772,18 @@ namespace Frida.XPC {
 		public const size_t MAX_SIZE = (128 * 1024 * 1024) - 1;
 
 		public static Message parse (uint8[] data) throws Error {
-			if (data.length < 24)
-				throw new Error.INVALID_ARGUMENT ("Invalid message: truncated");
+			size_t size;
+			var msg = try_parse (data, out size);
+			if (msg == null)
+				throw new Error.INVALID_ARGUMENT ("Message is truncated");
+			return msg;
+		}
+
+		public static Message? try_parse (uint8[] data, out size_t size) throws Error {
+			if (data.length < HEADER_SIZE) {
+				size = HEADER_SIZE;
+				return null;
+			}
 
 			var buf = new Buffer (new Bytes.static (data), 8, LITTLE_ENDIAN);
 
@@ -819,14 +805,15 @@ namespace Frida.XPC {
 
 			Variant? body = null;
 			uint64 message_size = buf.read_uint64 (8);
+			size = HEADER_SIZE + (size_t) message_size;
 			if (message_size != 0) {
 				if (message_size > MAX_SIZE) {
 					throw new Error.INVALID_ARGUMENT ("Invalid message: too large (%" + int64.FORMAT_MODIFIER + "u)",
 						message_size);
 				}
-				if (data.length - HEADER_SIZE != message_size)
-					throw new Error.INVALID_ARGUMENT ("Invalid message: incorrect message size");
-				body = ObjectParser.parse (data[HEADER_SIZE:]);
+				if (data.length - HEADER_SIZE < message_size)
+					return null;
+				body = ObjectParser.parse (data[HEADER_SIZE:HEADER_SIZE + message_size]);
 			}
 
 			uint64 message_id = buf.read_uint64 (16);
@@ -998,8 +985,6 @@ namespace Frida.XPC {
 		}
 
 		public unowned ObjectBuilder set_member_name (string name) {
-			var scope = (DictionaryScope) peek_scope ();
-
 			builder
 				.append_string (name)
 				.align (4);
