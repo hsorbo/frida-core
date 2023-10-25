@@ -17,6 +17,8 @@ namespace Frida.XPC {
 			ServiceEndpoint ep = disco.get_service ("com.apple.coredevice.appservice");
 			printerr ("Got endpoint: %s\n", ep.to_string ());
 
+			disco.close ();
+
 			var app_service = yield AppService.open (ep);
 			printerr ("Yay, got AppService!\n");
 

@@ -24,6 +24,8 @@ namespace Frida.XPC {
 	public class DiscoveryService : ServiceConnection, AsyncInitable {
 		private Promise<Variant> handshake_promise = new Promise<Variant> ();
 		private Variant handshake_body;
+		private Source? heartbeat_source;
+		private uint64 next_heartbeat_seqno = 1;
 
 		public static async DiscoveryService open (ServiceEndpoint ep, Cancellable? cancellable = null) throws Error, IOError {
 			var service = new DiscoveryService (ep);
@@ -50,6 +52,14 @@ namespace Frida.XPC {
 
 			handshake_body = yield handshake_promise.future.wait_async (cancellable);
 
+			var source = new TimeoutSource.seconds (2);
+			source.set_callback (() => {
+				send_heartbeat.begin ();
+				return Source.CONTINUE;
+			});
+			source.attach (MainContext.get_thread_default ());
+			heartbeat_source = source;
+
 			return true;
 		}
 
@@ -66,11 +76,19 @@ namespace Frida.XPC {
 		}
 
 		public override void on_disconnect () {
+			if (heartbeat_source != null) {
+				heartbeat_source.destroy ();
+				heartbeat_source = null;
+			}
+
 			if (!handshake_promise.future.ready)
 				handshake_promise.reject (new Error.TRANSPORT ("Connection closed while waiting for Handshake message"));
 		}
 
 		public override void on_message (Message msg) {
+			if (msg.body == null)
+				return;
+
 			var reader = new ObjectReader (msg.body);
 			try {
 				reader.read_member ("MessageType");
@@ -81,6 +99,21 @@ namespace Frida.XPC {
 					handshake_promise.resolve (msg.body);
 			} catch (Error e) {
 				printerr ("Oops: %s\n", e.message);
+			}
+		}
+
+		private async void send_heartbeat () {
+			try {
+				yield request (new ObjectBuilder ()
+							.begin_dictionary ()
+								.set_member_name ("MessageType")
+								.add_string_value ("Heartbeat")
+								.set_member_name ("SequenceNumber")
+								.add_uint64_value (next_heartbeat_seqno++)
+							.end_dictionary ()
+						.build (), io_cancellable);
+			} catch (GLib.Error e) {
+				printerr ("send_heartbeat() failed: %s\n", e.message);
 			}
 		}
 	}
@@ -125,16 +158,17 @@ namespace Frida.XPC {
 		private SocketConnection connection;
 		private InputStream input;
 		private OutputStream output;
-		private Cancellable io_cancellable = new Cancellable ();
+		protected Cancellable io_cancellable = new Cancellable ();
 
 		private State _state = CREATED;
+
+		private Gee.Map<uint64?, PendingResponse> pending_responses =
+			new Gee.HashMap<uint64?, PendingResponse> (Numeric.uint64_hash, Numeric.uint64_equal);
 
 		private NGHttp2.Session session;
 		private Stream root_stream;
 		private Stream reply_stream;
 		private uint next_message_id = 1;
-		private Source? heartbeat_source;
-		private uint64 next_heartbeat_seqno = 1;
 
 		private bool is_processing_messages;
 
@@ -226,29 +260,25 @@ namespace Frida.XPC {
 
 				root_stream = make_stream ();
 
-				Bytes header_request = new RequestBuilder (HEADER)
-					.begin_dictionary ()
-					.end_dictionary ()
+				Bytes header_request = new MessageBuilder (HEADER)
+					.add_body (new ObjectBuilder ()
+						.begin_dictionary ()
+						.end_dictionary ()
+						.build ()
+					)
 					.build ();
-				yield root_stream.submit_data (header_request);
+				yield root_stream.submit_data (header_request, io_cancellable);
 
-				Bytes ping_request = new RequestBuilder (PING)
+				Bytes ping_request = new MessageBuilder (PING)
 					.build ();
-				yield root_stream.submit_data (ping_request);
+				yield root_stream.submit_data (ping_request, io_cancellable);
 
 				reply_stream = make_stream ();
 
-				Bytes open_reply_channel_request = new RequestBuilder (HEADER, HEADER_OPENS_REPLY_CHANNEL)
+				Bytes open_reply_channel_request = new MessageBuilder (HEADER)
+					.add_flags (HEADER_OPENS_REPLY_CHANNEL)
 					.build ();
-				yield reply_stream.submit_data (open_reply_channel_request);
-
-				var source = new TimeoutSource.seconds (2);
-				source.set_callback (() => {
-					send_heartbeat.begin ();
-					return Source.CONTINUE;
-				});
-				source.attach (MainContext.get_thread_default ());
-				heartbeat_source = source;
+				yield reply_stream.submit_data (open_reply_channel_request, io_cancellable);
 			} catch (GLib.Error e) {
 				state = DISCONNECTED;
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
@@ -257,19 +287,113 @@ namespace Frida.XPC {
 			return true;
 		}
 
-		/*
-		private void change_state (State new_state) {
-			if (new_state == _state)
-				return;
-			_state = new_state;
-			notify_property ("state");
+		public void close () {
+			io_cancellable.cancel ();
 		}
-		*/
+
+		public async Message request (Bytes body, Cancellable? cancellable = null) throws Error, IOError {
+			uint64 request_id = make_message_id ();
+
+			Bytes raw_request = new MessageBuilder (MSG)
+				.add_flags (WANTS_REPLY)
+				.add_id (request_id)
+				.add_body (body)
+				.build ();
+
+			bool waiting = false;
+
+			var pending = new PendingResponse (() => {
+				if (waiting)
+					request.callback ();
+				return Source.REMOVE;
+			});
+			pending_responses[request_id] = pending;
+
+			try {
+				yield root_stream.submit_data (raw_request, cancellable);
+			} catch (Error e) {
+				if (pending_responses.unset (request_id))
+					pending.complete_with_error (e);
+			}
+
+			if (!pending.completed) {
+				var cancel_source = new CancellableSource (cancellable);
+				cancel_source.set_callback (() => {
+					if (pending_responses.unset (request_id))
+						pending.complete_with_error (new IOError.CANCELLED ("Operation was cancelled"));
+					return false;
+				});
+				cancel_source.attach (MainContext.get_thread_default ());
+
+				waiting = true;
+				yield;
+				waiting = false;
+
+				cancel_source.destroy ();
+			}
+
+			cancellable.set_error_if_cancelled ();
+
+			if (pending.error != null)
+				throw_api_error (pending.error);
+
+			return pending.result;
+		}
+
+		private class PendingResponse {
+			private SourceFunc? handler;
+
+			public bool completed {
+				get {
+					return result != null || error != null;
+				}
+			}
+
+			public Message? result {
+				get;
+				private set;
+			}
+
+			public GLib.Error? error {
+				get;
+				private set;
+			}
+
+			public PendingResponse (owned SourceFunc handler) {
+				this.handler = (owned) handler;
+			}
+
+			public void complete_with_result (Message result) {
+				this.result = result;
+				handler ();
+				handler = null;
+			}
+
+			public void complete_with_error (GLib.Error error) {
+				this.error = error;
+				handler ();
+				handler = null;
+			}
+		}
 
 		public virtual void on_disconnect () {
 		}
 
 		public virtual void on_message (Message msg) {
+		}
+
+		private void on_reply (Message msg, Stream sender) {
+			if (sender != reply_stream)
+				return;
+
+			PendingResponse response;
+			if (!pending_responses.unset (msg.id, out response))
+				return;
+
+			if (msg.body != null)
+				response.complete_with_result (msg);
+			else
+				response.complete_with_error (new Error.NOT_SUPPORTED ("Request not supported"));
 		}
 
 		private void maybe_send_pending () {
@@ -343,22 +467,6 @@ namespace Frida.XPC {
 			maybe_send_pending ();
 		}
 
-		private async void send_heartbeat () {
-			try {
-				Bytes heartbeat = new RequestBuilder (MSG, WANTS_REPLY, make_message_id ())
-					.begin_dictionary ()
-						.set_member_name ("MessageType")
-						.add_string_value ("Heartbeat")
-						.set_member_name ("SequenceNumber")
-						.add_uint64_value (next_heartbeat_seqno++)
-					.end_dictionary ()
-					.build ();
-				yield root_stream.submit_data (heartbeat);
-			} catch (GLib.Error e) {
-				printerr ("send_heartbeat() failed: %s\n", e.message);
-			}
-		}
-
 		private int on_frame_send (NGHttp2.Frame frame) {
 			if (frame.hd.type == DATA)
 				find_stream_by_id (frame.hd.stream_id).on_data_frame_send ();
@@ -392,10 +500,7 @@ namespace Frida.XPC {
 
 		private int on_stream_close (int32 stream_id, uint32 error_code) {
 			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
-			if (heartbeat_source != null) {
-				heartbeat_source.destroy ();
-				heartbeat_source = null;
-			}
+			io_cancellable.cancel ();
 
 			return 0;
 		}
@@ -441,7 +546,7 @@ namespace Frida.XPC {
 				this.id = id;
 			}
 
-			public async void submit_data (Bytes bytes) throws Error, IOError {
+			public async void submit_data (Bytes bytes, Cancellable? cancellable) throws Error, IOError {
 				try {
 					var msg = Message.parse (bytes.get_data ());
 					printerr (">>> [stream_id=%d] %s\n", id, msg.to_string ());
@@ -450,11 +555,20 @@ namespace Frida.XPC {
 				}
 
 				bool waiting = false;
+
 				var op = new SubmitOperation (bytes, () => {
 					if (waiting)
 						submit_data.callback ();
 					return Source.REMOVE;
 				});
+
+				var cancel_source = new CancellableSource (cancellable);
+				cancel_source.set_callback (() => {
+					op.state = CANCELLED;
+					op.callback ();
+					return Source.REMOVE;
+				});
+				cancel_source.attach (MainContext.get_thread_default ());
 
 				submissions.offer_tail (op);
 				maybe_submit_data ();
@@ -464,6 +578,13 @@ namespace Frida.XPC {
 					yield;
 					waiting = false;
 				}
+
+				cancel_source.destroy ();
+
+				if (op.state == CANCELLED && current_submission != op)
+					submissions.remove (op);
+
+				cancellable.set_error_if_cancelled ();
 
 				if (op.state == ERROR)
 					throw new Error.TRANSPORT ("%s", NGHttp2.strerror (op.error_code));
@@ -543,6 +664,7 @@ namespace Frida.XPC {
 					SUBMITTING,
 					SUBMITTED,
 					ERROR,
+					CANCELLED,
 				}
 
 				public SubmitOperation (Bytes bytes, owned SourceFunc callback) {
@@ -551,6 +673,8 @@ namespace Frida.XPC {
 				}
 
 				public void complete (State new_state, NGHttp2.ErrorCode err = -1) {
+					if (state != PENDING)
+						return;
 					state = new_state;
 					error_code = err;
 					callback ();
@@ -588,10 +712,9 @@ namespace Frida.XPC {
 				}
 
 				if (msg.type == MSG) {
-					if (msg.body == null)
-						return -1;
-
-					if ((msg.flags & (MessageFlags.WANTS_REPLY | MessageFlags.IS_REPLY)) == 0)
+					if ((msg.flags & MessageFlags.IS_REPLY) != 0)
+						parent.on_reply (msg, this);
+					else if ((msg.flags & (MessageFlags.WANTS_REPLY | MessageFlags.IS_REPLY)) == 0)
 						parent.on_message (msg);
 				}
 
@@ -620,29 +743,44 @@ namespace Frida.XPC {
 		}
 	}
 
-	public class RequestBuilder : ObjectBuilder {
+	public class MessageBuilder {
 		private MessageType message_type;
-		private MessageFlags message_flags;
-		private uint64 message_id;
+		private MessageFlags message_flags = NONE;
+		private uint64 message_id = 0;
+		private Bytes? body = null;
 
-		public RequestBuilder (MessageType message_type, MessageFlags message_flags = NONE, uint64 message_id = 0) {
+		public MessageBuilder (MessageType message_type) {
 			this.message_type = message_type;
-			this.message_flags = message_flags;
-			this.message_id = message_id;
 		}
 
-		public override Bytes build () {
-			Bytes body = base.build ();
+		public unowned MessageBuilder add_flags (MessageFlags flags) {
+			message_flags = flags;
+			return this;
+		}
 
-			return new BufferBuilder (8, LITTLE_ENDIAN)
+		public unowned MessageBuilder add_id (uint64 id) {
+			message_id = id;
+			return this;
+		}
+
+		public unowned MessageBuilder add_body (Bytes b) {
+			body = b;
+			return this;
+		}
+
+		public Bytes build () {
+			var builder = new BufferBuilder (8, LITTLE_ENDIAN)
 				.append_uint32 (Message.MAGIC)
 				.append_uint8 (Message.PROTOCOL_VERSION)
 				.append_uint8 (message_type)
 				.append_uint16 (message_flags)
-				.append_uint64 (body.length)
-				.append_uint64 (message_id)
-				.append_bytes (body)
-				.build ();
+				.append_uint64 ((body != null) ? body.length : 0)
+				.append_uint64 (message_id);
+
+			if (body != null)
+				builder.append_bytes (body);
+
+			return builder.build ();
 		}
 	}
 
@@ -916,9 +1054,7 @@ namespace Frida.XPC {
 			return this;
 		}
 
-		public virtual Bytes build () {
-			if (builder.offset == 8)
-				return new Bytes ({});
+		public Bytes build () {
 			return builder.build ();
 		}
 
@@ -941,7 +1077,7 @@ namespace Frida.XPC {
 				DICTIONARY,
 			}
 
-			protected Scope (Kind kind) {
+			public Scope (Kind kind) {
 				this.kind = kind;
 			}
 		}
