@@ -21,15 +21,105 @@ namespace Frida.XPC {
 		public extern static void _destroy_backend (void * backend);
 	}
 
+	public class DiscoveryService : ServiceConnection, AsyncInitable {
+		private Promise<Variant> handshake_promise = new Promise<Variant> ();
+		private Variant handshake_body;
+
+		public static async DiscoveryService open (ServiceEndpoint ep, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new DiscoveryService (ep);
+
+			try {
+				yield service.init_async (Priority.DEFAULT, cancellable);
+			} catch (GLib.Error e) {
+				throw_api_error (e);
+			}
+
+			return service;
+		}
+
+		private DiscoveryService (ServiceEndpoint ep) {
+			Object (endpoint: ep);
+		}
+
+		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
+			try {
+				yield base.init_async (io_priority, cancellable);
+			} catch (GLib.Error e) {
+				throw_api_error (e);
+			}
+
+			handshake_body = yield handshake_promise.future.wait_async (cancellable);
+
+			return true;
+		}
+
+		public ServiceEndpoint get_service (string identifier) throws Error {
+			var reader = new ObjectReader (handshake_body);
+			reader
+				.read_member ("Services")
+				.read_member (identifier);
+
+			var port = (uint16) uint.parse (reader.read_member ("Port").get_string_value ());
+			reader.end_member ();
+
+			return new ServiceEndpoint (endpoint.host, port);
+		}
+
+		public override void on_disconnect () {
+			if (!handshake_promise.future.ready)
+				handshake_promise.reject (new Error.TRANSPORT ("Connection closed while waiting for Handshake message"));
+		}
+
+		public override void on_message (Message msg) {
+			var reader = new ObjectReader (msg.body);
+			try {
+				reader.read_member ("MessageType");
+				unowned string message_type = reader.get_string_value ();
+				printerr ("Got message type: \"%s\"\n", message_type);
+
+				if (message_type == "Handshake")
+					handshake_promise.resolve (msg.body);
+			} catch (Error e) {
+				printerr ("Oops: %s\n", e.message);
+			}
+		}
+	}
+
+	public class AppService : ServiceConnection {
+		public static async AppService open (ServiceEndpoint ep, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new AppService (ep);
+
+			try {
+				yield service.init_async (Priority.DEFAULT, cancellable);
+			} catch (GLib.Error e) {
+				throw_api_error (e);
+			}
+
+			return service;
+		}
+
+		private AppService (ServiceEndpoint ep) {
+			Object (endpoint: ep);
+		}
+	}
+
 	public class ServiceConnection : Object, AsyncInitable {
-		public string host {
+		public ServiceEndpoint endpoint {
 			get;
 			construct;
 		}
 
-		public uint16 port {
-			get;
-			construct;
+		public State state {
+			get {
+				return _state;
+			}
+			private set {
+				if (value == _state)
+					return;
+				_state = value;
+				if (_state == DISCONNECTED)
+					on_disconnect ();
+			}
 		}
 
 		private SocketConnection connection;
@@ -37,8 +127,9 @@ namespace Frida.XPC {
 		private OutputStream output;
 		private Cancellable io_cancellable = new Cancellable ();
 
-		public NGHttp2.Session session;
+		private State _state = CREATED;
 
+		private NGHttp2.Session session;
 		private Stream root_stream;
 		private Stream reply_stream;
 		private uint next_message_id = 1;
@@ -50,8 +141,11 @@ namespace Frida.XPC {
 		private ByteArray? send_queue;
 		private Source? send_source;
 
-		public ServiceConnection (string host, uint16 port) {
-			Object (host: host, port: port);
+		public enum State {
+			CREATED,
+			CONNECTING,
+			CONNECTED,
+			DISCONNECTED,
 		}
 
 		construct {
@@ -104,13 +198,15 @@ namespace Frida.XPC {
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
 			try {
-				var connectable = NetworkAddress.parse (host, port);
+				var connectable = NetworkAddress.parse (endpoint.host, endpoint.port);
 
 				var client = new SocketClient ();
-				printerr ("Connecting to %s:%u...\n", host, port);
+				printerr ("Connecting to %s:%u...\n", endpoint.host, endpoint.port);
+				state = CONNECTING;
 				connection = yield client.connect_async (connectable, cancellable);
+				state = CONNECTED;
 
-				printerr ("Connected to %s:%u\n", host, port);
+				printerr ("Connected to %s:%u\n", endpoint.host, endpoint.port);
 
 				Tcp.enable_nodelay (connection.socket);
 
@@ -146,24 +242,6 @@ namespace Frida.XPC {
 					.build ();
 				yield reply_stream.submit_data (open_reply_channel_request);
 
-				Bytes handshake = new RequestBuilder (MSG, NONE, make_message_id ())
-					.begin_dictionary ()
-						.set_member_name ("MessageType")
-						.add_string_value ("Handshake")
-						.set_member_name ("UUID")
-						.add_uuid_value ("83CD038D-04B8-4E6F-A7CA-A715A43BAFE2") // FIXME
-						.set_member_name ("MessagingProtocolVersion")
-						.add_uint64_value (3)
-						.set_member_name ("Services")
-						.begin_dictionary ()
-						.end_dictionary ()
-						.set_member_name ("Properties")
-						.begin_dictionary ()
-						.end_dictionary ()
-					.end_dictionary ()
-					.build ();
-				yield root_stream.submit_data (handshake);
-
 				var source = new TimeoutSource.seconds (2);
 				source.set_callback (() => {
 					send_heartbeat.begin ();
@@ -172,10 +250,26 @@ namespace Frida.XPC {
 				source.attach (MainContext.get_thread_default ());
 				heartbeat_source = source;
 			} catch (GLib.Error e) {
+				state = DISCONNECTED;
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
 
 			return true;
+		}
+
+		/*
+		private void change_state (State new_state) {
+			if (new_state == _state)
+				return;
+			_state = new_state;
+			notify_property ("state");
+		}
+		*/
+
+		public virtual void on_disconnect () {
+		}
+
+		public virtual void on_message (Message msg) {
 		}
 
 		private void maybe_send_pending () {
@@ -195,14 +289,9 @@ namespace Frida.XPC {
 
 					ssize_t n = yield input.read_async (buffer, Priority.DEFAULT, io_cancellable);
 					if (n == 0) {
-						printerr ("EOF!\n");
 						is_processing_messages = false;
 						continue;
 					}
-
-					printerr ("\n=== Received:\n");
-					hexdump (buffer[:n]);
-					printerr ("===\n\n");
 
 					ssize_t result = session.mem_recv (buffer[:n]);
 					if (result < 0)
@@ -214,6 +303,8 @@ namespace Frida.XPC {
 					is_processing_messages = false;
 				}
 			}
+
+			state = DISCONNECTED;
 		}
 
 		private ssize_t on_send (uint8[] data, int flags) {
@@ -241,10 +332,6 @@ namespace Frida.XPC {
 			send_queue = null;
 
 			try {
-				printerr ("\n=== Sending:\n");
-				hexdump (buffer);
-				printerr ("===\n\n");
-
 				size_t bytes_written;
 				yield output.write_all_async (buffer, Priority.DEFAULT, io_cancellable, out bytes_written);
 			} catch (GLib.Error e) {
@@ -273,10 +360,8 @@ namespace Frida.XPC {
 		}
 
 		private int on_frame_send (NGHttp2.Frame frame) {
-			if (frame.hd.type == DATA) {
-				printerr ("on_frame_send() frame=%p\n", (void *) &frame);
+			if (frame.hd.type == DATA)
 				find_stream_by_id (frame.hd.stream_id).on_data_frame_send ();
-			}
 			return 0;
 		}
 
@@ -396,10 +481,8 @@ namespace Frida.XPC {
 				var data_prd = NGHttp2.DataProvider ();
 				data_prd.source.ptr = op;
 				data_prd.read_callback = on_data_provider_read;
-				printerr ("submit_data()\n");
 				int result = parent.session.submit_data (NGHttp2.DataFlag.NO_END_STREAM, id, data_prd);
 				if (result < 0) {
-					printerr ("OH NO\n");
 					while (true) {
 						op = submissions.poll_head ();
 						if (op == null)
@@ -422,35 +505,26 @@ namespace Frida.XPC {
 				unowned uint8[] data = op.bytes.get_data ();
 
 				uint remaining = data.length - op.cursor;
-				if (remaining == 0) {
-					data_flags |= NGHttp2.DataFlag.EOF;
-					return 0;
-				}
-
 				uint n = uint.min (remaining, buf.length);
 				Memory.copy (buf, (uint8 *) data + op.cursor, n);
 
 				op.cursor += n;
 
+				if (op.cursor == data.length)
+					data_flags |= NGHttp2.DataFlag.EOF;
+
 				return n;
 			}
 
 			public void on_data_frame_send () {
-				SubmitOperation op = submissions.poll_head ();
-				printerr ("on_data_frame_send(), op=%p\n", op);
-				op.state = SUBMITTED;
-				op.callback ();
+				submissions.poll_head ().complete (SUBMITTED);
 				current_submission = null;
 
 				maybe_submit_data ();
 			}
 
 			public void on_data_frame_not_send (NGHttp2.ErrorCode lib_error_code) {
-				SubmitOperation op = submissions.poll_head ();
-				printerr ("on_data_frame_not_send(), op=%p\n", op);
-				op.state = ERROR;
-				op.error_code = lib_error_code;
-				op.callback ();
+				submissions.poll_head ().complete (ERROR, lib_error_code);
 				current_submission = null;
 
 				maybe_submit_data ();
@@ -474,6 +548,12 @@ namespace Frida.XPC {
 				public SubmitOperation (Bytes bytes, owned SourceFunc callback) {
 					this.bytes = bytes;
 					this.callback = (owned) callback;
+				}
+
+				public void complete (State new_state, NGHttp2.ErrorCode err = -1) {
+					state = new_state;
+					error_code = err;
+					callback ();
 				}
 			}
 
@@ -508,19 +588,35 @@ namespace Frida.XPC {
 				}
 
 				if (msg.type == MSG) {
-					if (msg.body == null || !msg.body.get_type ().equal (VariantType.VARDICT))
+					if (msg.body == null)
 						return -1;
 
-					var dict = new VariantDict (msg.body);
-					string message_type;
-					if (!dict.lookup ("MessageType", "s", out message_type))
-						return 0;
-
-					printerr ("Got message type: \"%s\"\n", message_type);
+					if ((msg.flags & (MessageFlags.WANTS_REPLY | MessageFlags.IS_REPLY)) == 0)
+						parent.on_message (msg);
 				}
 
 				return 0;
 			}
+		}
+	}
+
+	public class ServiceEndpoint : Object {
+		public string host {
+			get;
+			construct;
+		}
+
+		public uint16 port {
+			get;
+			construct;
+		}
+
+		public ServiceEndpoint (string host, uint16 port) {
+			Object (host: host, port: port);
+		}
+
+		public string to_string () {
+			return "ServiceEndpoint { host: \"%s\", port: %u }".printf (host, port);
 		}
 	}
 
@@ -827,15 +923,15 @@ namespace Frida.XPC {
 		}
 
 		private void push_scope (Scope scope) {
-			scopes.offer_head (scope);
+			scopes.offer_tail (scope);
 		}
 
 		private Scope peek_scope () {
-			return scopes.peek_head ();
+			return scopes.peek_tail ();
 		}
 
 		private T pop_scope<T> () {
-			return (T) scopes.poll_head ();
+			return (T) scopes.poll_tail ();
 		}
 
 		private class Scope {
@@ -874,7 +970,7 @@ namespace Frida.XPC {
 		DICTIONARY	= 0xf000,
 	}
 
-	public class ObjectParser {
+	private class ObjectParser {
 		private Buffer buf;
 		private size_t cursor;
 		private EnumClass object_type_class;
@@ -1032,6 +1128,87 @@ namespace Frida.XPC {
 			size_t available = buf.bytes.get_size () - cursor;
 			if (available < required)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: truncated");
+		}
+	}
+
+	private class ObjectReader {
+		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
+
+		public ObjectReader (Variant v) {
+			push_scope (v);
+		}
+
+		public unowned ObjectReader read_member (string name) throws Error {
+			var scope = peek_scope ();
+			if (scope.dict == null)
+				throw new Error.PROTOCOL ("Dictionary expected");
+
+			Variant? v = scope.dict.lookup_value (name, null);
+			if (v == null)
+				throw new Error.PROTOCOL ("Key '%s' not found in dictionary", name);
+
+			push_scope (v);
+
+			return this;
+		}
+
+		public unowned ObjectReader end_member () {
+			pop_scope ();
+
+			return this;
+		}
+
+		public bool get_bool_value () throws Error {
+			return peek_scope ().get_value (VariantType.BOOLEAN).get_boolean ();
+		}
+
+		public int64 get_int64_value () throws Error {
+			return peek_scope ().get_value (VariantType.INT64).get_int64 ();
+		}
+
+		public uint64 get_uint64_value () throws Error {
+			return peek_scope ().get_value (VariantType.UINT64).get_uint64 ();
+		}
+
+		public unowned string get_string_value () throws Error {
+			return peek_scope ().get_value (VariantType.STRING).get_string ();
+		}
+
+		public unowned string get_uuid_value () throws Error {
+			return peek_scope ().get_value (VariantType.STRING).get_string (); // TODO: Use a tuple to avoid ambiguity.
+		}
+
+		private void push_scope (Variant v) {
+			scopes.offer_tail (new Scope (v));
+		}
+
+		private Scope peek_scope () {
+			return scopes.peek_tail ();
+		}
+
+		private Scope pop_scope () {
+			return scopes.poll_tail ();
+		}
+
+		private class Scope {
+			public Variant val;
+			public VariantDict? dict;
+
+			public Scope (Variant v) {
+				val = v;
+				if (v.get_type ().equal (VariantType.VARDICT))
+					dict = new VariantDict (v);
+			}
+
+			public Variant get_value (VariantType expected_type) throws Error {
+				if (!val.get_type ().equal (expected_type)) {
+					throw new Error.PROTOCOL ("Expected type '%s', got '%s'",
+						(string) expected_type.peek_string (),
+						(string) val.get_type ().peek_string ());
+				}
+
+				return val;
+			}
 		}
 	}
 

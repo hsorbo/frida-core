@@ -1,4 +1,7 @@
 namespace Frida.XPC {
+	private const string TUNNEL_HOST = "[fd41:537f:6137::1]";
+	private const uint16 RSD_PORT = 55198;
+
 	private int main (string[] args) {
 		var loop = new MainLoop ();
 		test_xpc.begin ();
@@ -8,34 +11,20 @@ namespace Frida.XPC {
 	}
 
 	private async void test_xpc () {
-		var conn = new ServiceConnection ("[fd6b:2cfe:ec6d::1]", 52488);
-		init_connection.begin (conn);
-
-		yield;
-	}
-
-	private async void init_connection (ServiceConnection conn) {
 		try {
-			yield conn.init_async (Priority.DEFAULT, null);
+			var disco = yield DiscoveryService.open (new ServiceEndpoint (TUNNEL_HOST, RSD_PORT));
 
-			/*
-			var source = new TimeoutSource (2000);
-			source.set_callback (() => {
-				init_connection.callback ();
-				return Source.REMOVE;
-			});
-			source.attach (MainContext.get_thread_default ());
-			printerr ("Before sleep\n");
+			ServiceEndpoint ep = disco.get_service ("com.apple.coredevice.appservice");
+			printerr ("Got endpoint: %s\n", ep.to_string ());
+
+			var app_service = yield AppService.open (ep);
+			printerr ("Yay, got AppService!\n");
+
 			yield;
-			printerr ("After sleep\n");
-			*/
-
-			printerr ("Test finished... Running forever\n");
-			yield;
-			printerr ("Should not get here\n");
-
-		} catch (GLib.Error e) {
-			printerr ("init_connection() failed: %s\n", e.message);
+		} catch (Error e) {
+			printerr ("Unable to open RSDConnection: %s\n", e.message);
+		} catch (IOError e) {
+			assert_not_reached ();
 		}
 	}
 }
