@@ -1486,7 +1486,7 @@ namespace Frida.XPC {
 		public unowned ObjectReader read_element (uint index) throws Error {
 			var scope = peek_scope ();
 			scope.check_array ();
-			push_scope (scope.val.get_child_value (index));
+			push_scope (scope.val.get_child_value (index).get_variant ());
 
 			return this;
 		}
