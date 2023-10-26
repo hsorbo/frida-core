@@ -1,6 +1,6 @@
 namespace Frida.XPC {
-	private const string TUNNEL_HOST = "[fd67:45ee:e98d::1]";
-	private const uint16 RSD_PORT = 62700;
+	private const string TUNNEL_HOST = "[fdbb:bdc1:aacb::1]";
+	private const uint16 RSD_PORT = 62781;
 
 	private int main (string[] args) {
 		var loop = new MainLoop ();
@@ -17,7 +17,14 @@ namespace Frida.XPC {
 			disco.close ();
 
 			var app_service = yield AppService.open (ep);
-			foreach (ProcessDetails p in yield app_service.list_processes ()) {
+
+			printerr ("=== Applications\n");
+			foreach (ApplicationInfo app in yield app_service.enumerate_applications ()) {
+				printerr ("%s\n", app.to_string ());
+			}
+
+			printerr ("\n=== Processes\n");
+			foreach (ProcessInfo p in yield app_service.enumerate_processes ()) {
 				printerr ("%s\n", p.to_string ());
 			}
 

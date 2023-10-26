@@ -118,7 +118,7 @@ namespace Frida.XPC {
 
 		private async void send_heartbeat () {
 			try {
-				yield connection.request (new ObjectBuilder ()
+				yield connection.request (new BodyBuilder ()
 							.begin_dictionary ()
 								.set_member_name ("MessageType")
 								.add_string_value ("Heartbeat")
@@ -149,12 +149,50 @@ namespace Frida.XPC {
 			Object (endpoint: endpoint);
 		}
 
-		public async Gee.List<ProcessDetails> list_processes (Cancellable? cancellable = null) throws Error, IOError {
-			var response = yield invoke ("com.apple.coredevice.feature.listprocesses", cancellable);
-			response.read_member ("processTokens");
+		public async Gee.List<ApplicationInfo> enumerate_applications (Cancellable? cancellable = null) throws Error, IOError {
+			Bytes input = new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("includeDefaultApps")
+					.add_bool_value (true)
+					.set_member_name ("includeRemovableApps")
+					.add_bool_value (true)
+					.set_member_name ("includeInternalApps")
+					.add_bool_value (true)
+					.set_member_name ("includeHiddenApps")
+					.add_bool_value (true)
+					.set_member_name ("includeAppClips")
+					.add_bool_value (true)
+				.end_dictionary ()
+				.build ();
+			var response = yield invoke ("com.apple.coredevice.feature.listapps", input, cancellable);
 
-			var processes = new Gee.ArrayList<ProcessDetails> ();
+			var applications = new Gee.ArrayList<ApplicationInfo> ();
 			uint n = response.count_elements ();
+			for (uint i = 0; i != n; i++) {
+				response.read_element (i);
+
+				string name = response
+					.read_member ("name")
+					.get_string_value ();
+				response.end_member ();
+
+				applications.add (new ApplicationInfo () {
+					name = name,
+				});
+
+				response.end_element ();
+			}
+
+			return applications;
+		}
+
+		public async Gee.List<ProcessInfo> enumerate_processes (Cancellable? cancellable = null) throws Error, IOError {
+			var response = yield invoke ("com.apple.coredevice.feature.listprocesses", null, cancellable);
+
+			var processes = new Gee.ArrayList<ProcessInfo> ();
+			uint n = response
+				.read_member ("processTokens")
+				.count_elements ();
 			for (uint i = 0; i != n; i++) {
 				response.read_element (i);
 
@@ -176,7 +214,7 @@ namespace Frida.XPC {
 
 				string path = url[7:];
 
-				processes.add (new ProcessDetails ((uint) pid, path));
+				processes.add (new ProcessInfo ((uint) pid, path));
 
 				response.end_element ();
 			}
@@ -185,17 +223,35 @@ namespace Frida.XPC {
 		}
 	}
 
-	public class ProcessDetails {
+	public class ApplicationInfo {
+		public string bundle_identifier;
+		public string bundle_version;
+		public string name;
+		public string version;
+		public string path;
+		public bool is_first_party;
+		public bool is_developer_app;
+		public bool is_removable;
+		public bool is_internal;
+		public bool is_hidden;
+		public bool is_app_clip;
+
+		public string to_string () {
+			return "ApplicationInfo { name: \"%s\" }".printf (name);
+		}
+	}
+
+	public class ProcessInfo {
 		public uint pid;
 		public string path;
 
-		public ProcessDetails (uint pid, string path) {
+		public ProcessInfo (uint pid, string path) {
 			this.pid = pid;
 			this.path = path;
 		}
 
 		public string to_string () {
-			return "ProcessDetails { pid: %u, path: \"%s\" }".printf (pid, path);
+			return "ProcessInfo { pid: %u, path: \"%s\" }".printf (pid, path);
 		}
 	}
 
@@ -218,16 +274,23 @@ namespace Frida.XPC {
 			connection.cancel ();
 		}
 
-		protected async ObjectReader invoke (string feature_identifier, Cancellable? cancellable) throws Error, IOError {
-			Message raw_response = yield connection.request (new ObjectBuilder ()
+		protected async ObjectReader invoke (string feature_identifier, Bytes? input = null, Cancellable? cancellable)
+				throws Error, IOError {
+			var request = new BodyBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("CoreDevice.featureIdentifier")
 					.add_string_value (feature_identifier)
 					.set_member_name ("CoreDevice.action")
 					.begin_dictionary ()
 					.end_dictionary ()
-					.set_member_name ("CoreDevice.input")
-					.add_null_value ()
+					.set_member_name ("CoreDevice.input");
+
+			if (input != null)
+				request.add_raw_value (input);
+			else
+				request.add_null_value ();
+
+			request
 					.set_member_name ("CoreDevice.invocationIdentifier")
 					.add_string_value ("CF561B2E-9E2B-46C8-A666-53A0BDAEE2E6")
 					.set_member_name ("CoreDevice.CoreDeviceDDIProtocolVersion")
@@ -249,8 +312,9 @@ namespace Frida.XPC {
 					.end_dictionary ()
 					.set_member_name ("CoreDevice.deviceIdentifier")
 					.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
-				.end_dictionary ()
-				.build ());
+				.end_dictionary ();
+
+			Message raw_response = yield connection.request (request.build ());
 
 			var response = new ObjectReader (raw_response.body);
 			response.read_member ("CoreDevice.output");
@@ -380,7 +444,7 @@ namespace Frida.XPC {
 				root_stream = make_stream ();
 
 				Bytes header_request = new MessageBuilder (HEADER)
-					.add_body (new ObjectBuilder ()
+					.add_body (new BodyBuilder ()
 						.begin_dictionary ()
 						.end_dictionary ()
 						.build ()
@@ -1095,15 +1159,21 @@ namespace Frida.XPC {
 		}
 	}
 
-	public class ObjectBuilder {
-		private BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
-		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
+	public class BodyBuilder : ObjectBuilder {
+		public BodyBuilder () {
+			base ();
 
-		public ObjectBuilder () {
 			builder
 				.append_uint32 (SerializedObject.MAGIC)
 				.append_uint32 (SerializedObject.VERSION);
+		}
+	}
 
+	public class ObjectBuilder {
+		protected BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
+		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
+
+		public ObjectBuilder () {
 			push_scope (new Scope (ROOT));
 		}
 
@@ -1170,6 +1240,11 @@ namespace Frida.XPC {
 			return this;
 		}
 
+		public unowned ObjectBuilder add_bool_value (bool val) {
+			begin_object (BOOL).append_uint32 ((uint32) val);
+			return this;
+		}
+
 		public unowned ObjectBuilder add_int64_value (int64 val) {
 			begin_object (INT64).append_int64 (val);
 			return this;
@@ -1203,6 +1278,12 @@ namespace Frida.XPC {
 			assert (uuid.len == 16);
 
 			begin_object (UUID).append_data (uuid.data);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_raw_value (Bytes val) {
+			peek_scope ().num_objects++;
+			builder.append_bytes (val);
 			return this;
 		}
 
@@ -1451,6 +1532,12 @@ namespace Frida.XPC {
 	}
 
 	public class ObjectReader {
+		public Variant object {
+			get {
+				return scopes.peek_head ().val;
+			}
+		}
+
 		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
 
 		public ObjectReader (Variant v) {
@@ -1460,7 +1547,7 @@ namespace Frida.XPC {
 		public unowned ObjectReader read_member (string name) throws Error {
 			var scope = peek_scope ();
 			if (scope.dict == null)
-				throw new Error.PROTOCOL ("Dictionary expected");
+				throw new Error.PROTOCOL ("Dictionary expected, but at %s", scope.val.print (true));
 
 			Variant? v = scope.dict.lookup_value (name, null);
 			if (v == null)
@@ -1556,7 +1643,7 @@ namespace Frida.XPC {
 
 			public void check_array () throws Error {
 				if (!is_array)
-					throw new Error.PROTOCOL ("Array expected");
+					throw new Error.PROTOCOL ("Array expected, but at %s", val.print (true));
 			}
 		}
 	}
