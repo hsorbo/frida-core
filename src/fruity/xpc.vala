@@ -112,7 +112,6 @@ namespace Frida.XPC {
 				if (message_type == "Handshake")
 					handshake_promise.resolve (msg.body);
 			} catch (Error e) {
-				printerr ("Oops: %s\n", e.message);
 			}
 		}
 
@@ -127,7 +126,6 @@ namespace Frida.XPC {
 							.end_dictionary ()
 						.build (), io_cancellable);
 			} catch (GLib.Error e) {
-				printerr ("send_heartbeat() failed: %s\n", e.message);
 			}
 		}
 	}
@@ -171,13 +169,79 @@ namespace Frida.XPC {
 			for (uint i = 0; i != n; i++) {
 				response.read_element (i);
 
+				string bundle_identifier = response
+					.read_member ("bundleIdentifier")
+					.get_string_value ();
+				response.end_member ();
+
+				string? bundle_version = null;
+				if (response.has_member ("bundleVersion")) {
+					bundle_version = response
+						.read_member ("bundleVersion")
+						.get_string_value ();
+					response.end_member ();
+				}
+
 				string name = response
 					.read_member ("name")
 					.get_string_value ();
 				response.end_member ();
 
+				string? version = null;
+				if (response.has_member ("version")) {
+					version = response
+						.read_member ("version")
+						.get_string_value ();
+					response.end_member ();
+				}
+
+				string path = response
+					.read_member ("path")
+					.get_string_value ();
+				response.end_member ();
+
+				bool is_first_party = response
+					.read_member ("isFirstParty")
+					.get_bool_value ();
+				response.end_member ();
+
+				bool is_developer_app = response
+					.read_member ("isDeveloperApp")
+					.get_bool_value ();
+				response.end_member ();
+
+				bool is_removable = response
+					.read_member ("isRemovable")
+					.get_bool_value ();
+				response.end_member ();
+
+				bool is_internal = response
+					.read_member ("isInternal")
+					.get_bool_value ();
+				response.end_member ();
+
+				bool is_hidden = response
+					.read_member ("isHidden")
+					.get_bool_value ();
+				response.end_member ();
+
+				bool is_app_clip = response
+					.read_member ("isAppClip")
+					.get_bool_value ();
+				response.end_member ();
+
 				applications.add (new ApplicationInfo () {
+					bundle_identifier = bundle_identifier,
+					bundle_version = bundle_version,
 					name = name,
+					version = version,
+					path = path,
+					is_first_party = is_first_party,
+					is_developer_app = is_developer_app,
+					is_removable = is_removable,
+					is_internal = is_internal,
+					is_hidden = is_hidden,
+					is_app_clip = is_app_clip,
 				});
 
 				response.end_element ();
@@ -214,7 +278,10 @@ namespace Frida.XPC {
 
 				string path = url[7:];
 
-				processes.add (new ProcessInfo ((uint) pid, path));
+				processes.add (new ProcessInfo () {
+					pid = (uint) pid,
+					path = path,
+				});
 
 				response.end_element ();
 			}
@@ -225,9 +292,9 @@ namespace Frida.XPC {
 
 	public class ApplicationInfo {
 		public string bundle_identifier;
-		public string bundle_version;
+		public string? bundle_version;
 		public string name;
-		public string version;
+		public string? version;
 		public string path;
 		public bool is_first_party;
 		public bool is_developer_app;
@@ -237,18 +304,33 @@ namespace Frida.XPC {
 		public bool is_app_clip;
 
 		public string to_string () {
-			return "ApplicationInfo { name: \"%s\" }".printf (name);
+			var summary = new StringBuilder.sized (128);
+
+			summary
+				.append ("ApplicationInfo {")
+				.append (@"\n\tbundle_identifier: \"$bundle_identifier\",");
+			if (bundle_version != null)
+				summary.append (@"\n\tbundle_version: \"$bundle_version\",");
+			summary.append (@"\n\tname: \"$name\",");
+			if (version != null)
+				summary.append (@"\n\tversion: \"$version\",");
+			summary
+				.append (@"\n\tpath: \"$path\",")
+				.append (@"\n\tis_first_party: $is_first_party,")
+				.append (@"\n\tis_developer_app: $is_developer_app,")
+				.append (@"\n\tis_removable: $is_removable,")
+				.append (@"\n\tis_internal: $is_internal,")
+				.append (@"\n\tis_hidden: $is_hidden,")
+				.append (@"\n\tis_app_clip: $is_app_clip,")
+				.append ("\n}");
+
+			return summary.str;
 		}
 	}
 
 	public class ProcessInfo {
 		public uint pid;
 		public string path;
-
-		public ProcessInfo (uint pid, string path) {
-			this.pid = pid;
-			this.path = path;
-		}
 
 		public string to_string () {
 			return "ProcessInfo { pid: %u, path: \"%s\" }".printf (pid, path);
@@ -365,9 +447,7 @@ namespace Frida.XPC {
 				NetworkAddress address = NetworkAddress.parse (endpoint.host, endpoint.port);
 
 				var client = new SocketClient ();
-				printerr ("Connecting to %s:%u...\n", endpoint.host, endpoint.port);
 				SocketConnection connection = yield client.connect_async (address, cancellable);
-				printerr ("Connected to %s:%u\n", endpoint.host, endpoint.port);
 
 				Tcp.enable_nodelay (connection.socket);
 
@@ -408,10 +488,6 @@ namespace Frida.XPC {
 			callbacks.set_on_stream_close_callback ((session, stream_id, error_code, user_data) => {
 				Connection * self = user_data;
 				return self->on_stream_close (stream_id, error_code);
-			});
-			callbacks.set_error_callback ((session, code, msg, user_data) => {
-				Connection * self = user_data;
-				return self->on_error (code, msg);
 			});
 
 			NGHttp2.Option option;
@@ -605,8 +681,6 @@ namespace Frida.XPC {
 
 					session.consume_connection (n);
 				} catch (GLib.Error e) {
-					if (!(e is IOError.CANCELLED))
-						printerr ("Oops: %s\n", e.message);
 					if (e is Error && pending_error == null)
 						pending_error = (Error) e;
 					is_processing_messages = false;
@@ -656,7 +730,6 @@ namespace Frida.XPC {
 				yield stream.get_output_stream ().write_all_async (buffer, Priority.DEFAULT, io_cancellable,
 					out bytes_written);
 			} catch (GLib.Error e) {
-				printerr ("write_all_async() failed: %s\n", e.message);
 			}
 
 			send_source = null;
@@ -687,14 +760,7 @@ namespace Frida.XPC {
 		}
 
 		private int on_stream_close (int32 stream_id, uint32 error_code) {
-			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
 			io_cancellable.cancel ();
-			return 0;
-		}
-
-		private int on_error (NGHttp2.ErrorCode code, char[] msg) {
-			string m = ((string) msg).substring (0, msg.length);
-			printerr ("on_error() code=%d msg=\"%s\"\n", code, m);
 			return 0;
 		}
 
@@ -734,13 +800,6 @@ namespace Frida.XPC {
 			}
 
 			public async void submit_data (Bytes bytes, Cancellable? cancellable) throws Error, IOError {
-				try {
-					var msg = Message.parse (bytes.get_data ());
-					printerr (">>> [stream_id=%d] %s\n", id, msg.to_string ());
-				} catch (Error e) {
-					printerr ("Failed to parse message: %s\n", e.message);
-				}
-
 				bool waiting = false;
 
 				var op = new SubmitOperation (bytes, () => {
@@ -885,8 +944,6 @@ namespace Frida.XPC {
 				if (msg == null)
 					return 0;
 				incoming_message.remove_range (0, (uint) size);
-
-				printerr ("<<< [stream_id=%d] %s\n", frame.hd.stream_id, msg.to_string ());
 
 				if (msg.type == MSG) {
 					if ((msg.flags & MessageFlags.IS_REPLY) != 0)
@@ -1544,6 +1601,13 @@ namespace Frida.XPC {
 			push_scope (v);
 		}
 
+		public bool has_member (string name) throws Error {
+			var scope = peek_scope ();
+			if (scope.dict == null)
+				throw new Error.PROTOCOL ("Dictionary expected, but at %s", scope.val.print (true));
+			return scope.dict.contains (name);
+		}
+
 		public unowned ObjectReader read_member (string name) throws Error {
 			var scope = peek_scope ();
 			if (scope.dict == null)
@@ -1551,7 +1615,7 @@ namespace Frida.XPC {
 
 			Variant? v = scope.dict.lookup_value (name, null);
 			if (v == null)
-				throw new Error.PROTOCOL ("Key '%s' not found in dictionary", name);
+				throw new Error.PROTOCOL ("Key '%s' not found in dictionary: %s", name, scope.val.print (true));
 
 			push_scope (v);
 
