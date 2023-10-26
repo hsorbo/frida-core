@@ -21,14 +21,23 @@ namespace Frida.XPC {
 		public extern static void _destroy_backend (void * backend);
 	}
 
-	public class DiscoveryService : ServiceConnection, AsyncInitable {
+	public class DiscoveryService : Object, AsyncInitable {
+		public Endpoint endpoint {
+			get;
+			construct;
+		}
+
+		private Cancellable io_cancellable = new Cancellable ();
+
+		private Connection connection;
+
 		private Promise<Variant> handshake_promise = new Promise<Variant> ();
 		private Variant handshake_body;
 		private Source? heartbeat_source;
 		private uint64 next_heartbeat_seqno = 1;
 
-		public static async DiscoveryService open (ServiceEndpoint ep, Cancellable? cancellable = null) throws Error, IOError {
-			var service = new DiscoveryService (ep);
+		public static async DiscoveryService open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new DiscoveryService (endpoint);
 
 			try {
 				yield service.init_async (Priority.DEFAULT, cancellable);
@@ -39,16 +48,15 @@ namespace Frida.XPC {
 			return service;
 		}
 
-		private DiscoveryService (ServiceEndpoint ep) {
-			Object (endpoint: ep);
+		private DiscoveryService (Endpoint endpoint) {
+			Object (endpoint: endpoint);
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			try {
-				yield base.init_async (io_priority, cancellable);
-			} catch (GLib.Error e) {
-				throw_api_error (e);
-			}
+			connection = yield Connection.open (endpoint, cancellable);
+			connection.close.connect (on_close);
+			connection.message.connect (on_message);
+			connection.activate ();
 
 			handshake_body = yield handshake_promise.future.wait_async (cancellable);
 
@@ -63,7 +71,11 @@ namespace Frida.XPC {
 			return true;
 		}
 
-		public ServiceEndpoint get_service (string identifier) throws Error {
+		public void close () {
+			connection.cancel ();
+		}
+
+		public Endpoint get_service (string identifier) throws Error {
 			var reader = new ObjectReader (handshake_body);
 			reader
 				.read_member ("Services")
@@ -72,20 +84,24 @@ namespace Frida.XPC {
 			var port = (uint16) uint.parse (reader.read_member ("Port").get_string_value ());
 			reader.end_member ();
 
-			return new ServiceEndpoint (endpoint.host, port);
+			return new Endpoint (endpoint.host, port);
 		}
 
-		public override void on_disconnect () {
+		private void on_close (Error? error) {
 			if (heartbeat_source != null) {
 				heartbeat_source.destroy ();
 				heartbeat_source = null;
 			}
 
-			if (!handshake_promise.future.ready)
-				handshake_promise.reject (new Error.TRANSPORT ("Connection closed while waiting for Handshake message"));
+			if (!handshake_promise.future.ready) {
+				handshake_promise.reject (
+					(error != null)
+						? error
+						: new Error.TRANSPORT ("Connection closed while waiting for Handshake message"));
+			}
 		}
 
-		public override void on_message (Message msg) {
+		private void on_message (Message msg) {
 			if (msg.body == null)
 				return;
 
@@ -103,7 +119,7 @@ namespace Frida.XPC {
 
 		private async void send_heartbeat () {
 			try {
-				yield request (new ObjectBuilder ()
+				yield connection.request (new ObjectBuilder ()
 							.begin_dictionary ()
 								.set_member_name ("MessageType")
 								.add_string_value ("Heartbeat")
@@ -117,9 +133,9 @@ namespace Frida.XPC {
 		}
 	}
 
-	public class AppService : ServiceConnection {
-		public static async AppService open (ServiceEndpoint ep, Cancellable? cancellable = null) throws Error, IOError {
-			var service = new AppService (ep);
+	public class AppService : CoreDeviceService {
+		public static async AppService open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new AppService (endpoint);
 
 			try {
 				yield service.init_async (Priority.DEFAULT, cancellable);
@@ -130,36 +146,91 @@ namespace Frida.XPC {
 			return service;
 		}
 
-		private AppService (ServiceEndpoint ep) {
-			Object (endpoint: ep);
+		private AppService (Endpoint endpoint) {
+			Object (endpoint: endpoint);
+		}
+
+		public async void list_processes (Cancellable? cancellable = null) throws Error, IOError {
+			var response = yield invoke ("com.apple.coredevice.feature.listprocesses", cancellable);
+			response.read_member ("processTokens");
 		}
 	}
 
-	public class ServiceConnection : Object, AsyncInitable {
-		public ServiceEndpoint endpoint {
+	public abstract class CoreDeviceService : Object, AsyncInitable {
+		public Endpoint endpoint {
+			get;
+			construct;
+		}
+
+		private Connection connection;
+
+		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
+			connection = yield Connection.open (endpoint, cancellable);
+			connection.activate ();
+
+			return true;
+		}
+
+		public void close () {
+			connection.cancel ();
+		}
+
+		protected async ObjectReader invoke (string feature_identifier, Cancellable? cancellable) throws Error, IOError {
+			Message raw_response = yield connection.request (new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("CoreDevice.featureIdentifier")
+					.add_string_value (feature_identifier)
+					.set_member_name ("CoreDevice.action")
+					.begin_dictionary ()
+					.end_dictionary ()
+					.set_member_name ("CoreDevice.input")
+					.add_null_value ()
+					.set_member_name ("CoreDevice.invocationIdentifier")
+					.add_string_value ("CF561B2E-9E2B-46C8-A666-53A0BDAEE2E6")
+					.set_member_name ("CoreDevice.CoreDeviceDDIProtocolVersion")
+					.add_int64_value (0)
+					.set_member_name ("CoreDevice.coreDeviceVersion")
+					.begin_dictionary ()
+						.set_member_name ("originalComponentsCount")
+						.add_int64_value (2)
+						.set_member_name ("components")
+						.begin_array ()
+							.add_uint64_value (348)
+							.add_uint64_value (1)
+							.add_uint64_value (0)
+							.add_uint64_value (0)
+							.add_uint64_value (0)
+						.end_array ()
+						.set_member_name ("stringValue")
+						.add_string_value ("348.1")
+					.end_dictionary ()
+					.set_member_name ("CoreDevice.deviceIdentifier")
+					.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
+				.end_dictionary ()
+				.build ());
+			return new ObjectReader (raw_response.body)
+				.read_member ("CoreDevice.output");
+		}
+	}
+
+	public sealed class Connection : Object {
+		public signal void close (Error? error);
+		public signal void message (Message msg);
+
+		public IOStream stream {
 			get;
 			construct;
 		}
 
 		public State state {
-			get {
-				return _state;
-			}
-			private set {
-				if (value == _state)
-					return;
-				_state = value;
-				if (_state == DISCONNECTED)
-					on_disconnect ();
-			}
+			get;
+			private set;
+			default = INACTIVE;
 		}
 
-		private SocketConnection connection;
-		private InputStream input;
-		private OutputStream output;
-		protected Cancellable io_cancellable = new Cancellable ();
+		private Cancellable io_cancellable = new Cancellable ();
 
-		private State _state = CREATED;
+		private Error? pending_error = null;
 
 		private Gee.Map<uint64?, PendingResponse> pending_responses =
 			new Gee.HashMap<uint64?, PendingResponse> (Numeric.uint64_hash, Numeric.uint64_equal);
@@ -175,10 +246,30 @@ namespace Frida.XPC {
 		private Source? send_source;
 
 		public enum State {
-			CREATED,
-			CONNECTING,
-			CONNECTED,
-			DISCONNECTED,
+			INACTIVE,
+			ACTIVE,
+			CLOSED,
+		}
+
+		public static async Connection open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
+			try {
+				NetworkAddress address = NetworkAddress.parse (endpoint.host, endpoint.port);
+
+				var client = new SocketClient ();
+				printerr ("Connecting to %s:%u...\n", endpoint.host, endpoint.port);
+				SocketConnection connection = yield client.connect_async (address, cancellable);
+				printerr ("Connected to %s:%u\n", endpoint.host, endpoint.port);
+
+				Tcp.enable_nodelay (connection.socket);
+
+				return new Connection (connection);
+			} catch (GLib.Error e) {
+				throw new Error.TRANSPORT ("%s", e.message);
+			}
+		}
+
+		public Connection (IOStream stream) {
+			Object (stream: stream);
 		}
 
 		construct {
@@ -186,31 +277,31 @@ namespace Frida.XPC {
 			NGHttp2.SessionCallbacks.make (out callbacks);
 
 			callbacks.set_send_callback ((session, data, flags, user_data) => {
-				ServiceConnection * self = user_data;
+				Connection * self = user_data;
 				return self->on_send (data, flags);
 			});
 			callbacks.set_on_frame_send_callback ((session, frame, user_data) => {
-				ServiceConnection * self = user_data;
+				Connection * self = user_data;
 				return self->on_frame_send (frame);
 			});
 			callbacks.set_on_frame_not_send_callback ((session, frame, lib_error_code, user_data) => {
-				ServiceConnection * self = user_data;
+				Connection * self = user_data;
 				return self->on_frame_not_send (frame, lib_error_code);
 			});
 			callbacks.set_on_data_chunk_recv_callback ((session, flags, stream_id, data, user_data) => {
-				ServiceConnection * self = user_data;
+				Connection * self = user_data;
 				return self->on_data_chunk_recv (flags, stream_id, data);
 			});
 			callbacks.set_on_frame_recv_callback ((session, frame, user_data) => {
-				ServiceConnection * self = user_data;
+				Connection * self = user_data;
 				return self->on_frame_recv (frame);
 			});
 			callbacks.set_on_stream_close_callback ((session, stream_id, error_code, user_data) => {
-				ServiceConnection * self = user_data;
+				Connection * self = user_data;
 				return self->on_stream_close (stream_id, error_code);
 			});
 			callbacks.set_error_callback ((session, code, msg, user_data) => {
-				ServiceConnection * self = user_data;
+				Connection * self = user_data;
 				return self->on_error (code, msg);
 			});
 
@@ -225,25 +316,13 @@ namespace Frida.XPC {
 			NGHttp2.ClientSession.make (out session, callbacks, this, option);
 		}
 
-		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
+		public void activate () {
+			do_activate.begin ();
+		}
+
+		private async void do_activate () {
 			try {
-				var connectable = NetworkAddress.parse (endpoint.host, endpoint.port);
-
-				var client = new SocketClient ();
-				printerr ("Connecting to %s:%u...\n", endpoint.host, endpoint.port);
-				state = CONNECTING;
-				connection = yield client.connect_async (connectable, cancellable);
-				state = CONNECTED;
-
-				printerr ("Connected to %s:%u\n", endpoint.host, endpoint.port);
-
-				Tcp.enable_nodelay (connection.socket);
-
-				input = connection.get_input_stream ();
-				output = connection.get_output_stream ();
-
 				is_processing_messages = true;
-
 				process_incoming_messages.begin ();
 
 				session.submit_settings (NGHttp2.Flag.NONE, {
@@ -275,14 +354,13 @@ namespace Frida.XPC {
 					.build ();
 				yield reply_stream.submit_data (open_reply_channel_request, io_cancellable);
 			} catch (GLib.Error e) {
-				state = DISCONNECTED;
-				throw new Error.NOT_SUPPORTED ("%s", e.message);
+				if (e is Error && pending_error == null)
+					pending_error = (Error) e;
+				cancel ();
 			}
-
-			return true;
 		}
 
-		public void close () {
+		public void cancel () {
 			io_cancellable.cancel ();
 		}
 
@@ -371,12 +449,6 @@ namespace Frida.XPC {
 			}
 		}
 
-		public virtual void on_disconnect () {
-		}
-
-		public virtual void on_message (Message msg) {
-		}
-
 		private void on_reply (Message msg, Stream sender) {
 			if (sender != reply_stream)
 				return;
@@ -402,10 +474,12 @@ namespace Frida.XPC {
 		}
 
 		private async void process_incoming_messages () {
+			InputStream input = stream.get_input_stream ();
+
+			var buffer = new uint8[4096];
+
 			while (is_processing_messages) {
 				try {
-					var buffer = new uint8[4096];
-
 					ssize_t n = yield input.read_async (buffer, Priority.DEFAULT, io_cancellable);
 					if (n == 0) {
 						is_processing_messages = false;
@@ -418,12 +492,18 @@ namespace Frida.XPC {
 
 					session.consume_connection (n);
 				} catch (GLib.Error e) {
-					printerr ("Oops: %s\n", e.message);
+					if (!(e is IOError.CANCELLED))
+						printerr ("Oops: %s\n", e.message);
+					if (e is Error && pending_error == null)
+						pending_error = (Error) e;
 					is_processing_messages = false;
 				}
 			}
 
-			state = DISCONNECTED;
+			state = CLOSED;
+
+			close (pending_error);
+			pending_error = null;
 		}
 
 		private ssize_t on_send (uint8[] data, int flags) {
@@ -452,7 +532,8 @@ namespace Frida.XPC {
 
 			try {
 				size_t bytes_written;
-				yield output.write_all_async (buffer, Priority.DEFAULT, io_cancellable, out bytes_written);
+				yield stream.get_output_stream ().write_all_async (buffer, Priority.DEFAULT, io_cancellable,
+					out bytes_written);
 			} catch (GLib.Error e) {
 				printerr ("write_all_async() failed: %s\n", e.message);
 			}
@@ -521,13 +602,13 @@ namespace Frida.XPC {
 		private class Stream {
 			public int32 id;
 
-			private weak ServiceConnection parent;
+			private weak Connection parent;
 
 			private Gee.Deque<SubmitOperation> submissions = new Gee.ArrayQueue<SubmitOperation> ();
 			private SubmitOperation? current_submission = null;
 			private ByteArray incoming_message = new ByteArray ();
 
-			public Stream (ServiceConnection parent, int32 id) {
+			public Stream (Connection parent, int32 id) {
 				this.parent = parent;
 				this.id = id;
 			}
@@ -691,7 +772,7 @@ namespace Frida.XPC {
 					if ((msg.flags & MessageFlags.IS_REPLY) != 0)
 						parent.on_reply (msg, this);
 					else if ((msg.flags & (MessageFlags.WANTS_REPLY | MessageFlags.IS_REPLY)) == 0)
-						parent.on_message (msg);
+						parent.message (msg);
 				}
 
 				return 0;
@@ -699,7 +780,7 @@ namespace Frida.XPC {
 		}
 	}
 
-	public class ServiceEndpoint : Object {
+	public class Endpoint : Object {
 		public string host {
 			get;
 			construct;
@@ -710,12 +791,12 @@ namespace Frida.XPC {
 			construct;
 		}
 
-		public ServiceEndpoint (string host, uint16 port) {
+		public Endpoint (string host, uint16 port) {
 			Object (host: host, port: port);
 		}
 
 		public string to_string () {
-			return "ServiceEndpoint { host: \"%s\", port: %u }".printf (host, port);
+			return "Endpoint { host: \"%s\", port: %u }".printf (host, port);
 		}
 	}
 
@@ -1313,7 +1394,7 @@ namespace Frida.XPC {
 		}
 	}
 
-	private class ObjectReader {
+	public class ObjectReader {
 		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
 
 		public ObjectReader (Variant v) {
