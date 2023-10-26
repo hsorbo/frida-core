@@ -17,11 +17,13 @@ namespace Frida.XPC {
 			disco.close ();
 
 			var app_service = yield AppService.open (ep);
-			yield app_service.list_processes ();
+			foreach (ProcessDetails p in yield app_service.list_processes ()) {
+				printerr ("%s\n", p.to_string ());
+			}
 
 			yield;
 		} catch (Error e) {
-			printerr ("Unable to open RSDConnection: %s\n", e.message);
+			printerr ("%s\n", e.message);
 		} catch (IOError e) {
 			assert_not_reached ();
 		}

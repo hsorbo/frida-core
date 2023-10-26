@@ -82,7 +82,6 @@ namespace Frida.XPC {
 				.read_member (identifier);
 
 			var port = (uint16) uint.parse (reader.read_member ("Port").get_string_value ());
-			reader.end_member ();
 
 			return new Endpoint (endpoint.host, port);
 		}
@@ -150,9 +149,53 @@ namespace Frida.XPC {
 			Object (endpoint: endpoint);
 		}
 
-		public async void list_processes (Cancellable? cancellable = null) throws Error, IOError {
+		public async Gee.List<ProcessDetails> list_processes (Cancellable? cancellable = null) throws Error, IOError {
 			var response = yield invoke ("com.apple.coredevice.feature.listprocesses", cancellable);
 			response.read_member ("processTokens");
+
+			var processes = new Gee.ArrayList<ProcessDetails> ();
+			uint n = response.count_elements ();
+			for (uint i = 0; i != n; i++) {
+				response.read_element (i);
+
+				int64 pid = response
+					.read_member ("processIdentifier")
+					.get_int64_value ();
+				response.end_member ();
+
+				string url = response
+					.read_member ("executableURL")
+					.read_member ("relative")
+					.get_string_value ();
+				response
+					.end_member ()
+					.end_member ();
+
+				if (!url.has_prefix ("file://"))
+					throw new Error.PROTOCOL ("Unsupported URL: %s", url);
+
+				string path = url[7:];
+
+				processes.add (new ProcessDetails ((uint) pid, path));
+
+				response.end_element ();
+			}
+
+			return processes;
+		}
+	}
+
+	public class ProcessDetails {
+		public uint pid;
+		public string path;
+
+		public ProcessDetails (uint pid, string path) {
+			this.pid = pid;
+			this.path = path;
+		}
+
+		public string to_string () {
+			return "ProcessDetails { pid: %u, path: \"%s\" }".printf (pid, path);
 		}
 	}
 
@@ -208,8 +251,10 @@ namespace Frida.XPC {
 					.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
 				.end_dictionary ()
 				.build ());
-			return new ObjectReader (raw_response.body)
-				.read_member ("CoreDevice.output");
+
+			var response = new ObjectReader (raw_response.body);
+			response.read_member ("CoreDevice.output");
+			return response;
 		}
 	}
 
@@ -437,12 +482,16 @@ namespace Frida.XPC {
 			}
 
 			public void complete_with_result (Message result) {
+				if (completed)
+					return;
 				this.result = result;
 				handler ();
 				handler = null;
 			}
 
 			public void complete_with_error (GLib.Error error) {
+				if (completed)
+					return;
 				this.error = error;
 				handler ();
 				handler = null;
@@ -499,6 +548,14 @@ namespace Frida.XPC {
 					is_processing_messages = false;
 				}
 			}
+
+			foreach (var r in pending_responses.values.to_array ()) {
+				r.complete_with_error (
+					(pending_error != null)
+						? pending_error
+						: new Error.TRANSPORT ("Connection closed"));
+			}
+			pending_responses.clear ();
 
 			state = CLOSED;
 
@@ -568,7 +625,6 @@ namespace Frida.XPC {
 		private int on_stream_close (int32 stream_id, uint32 error_code) {
 			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
 			io_cancellable.cancel ();
-
 			return 0;
 		}
 
@@ -1421,6 +1477,26 @@ namespace Frida.XPC {
 			return this;
 		}
 
+		public uint count_elements () throws Error {
+			var scope = peek_scope ();
+			scope.check_array ();
+			return (uint) scope.val.n_children ();
+		}
+
+		public unowned ObjectReader read_element (uint index) throws Error {
+			var scope = peek_scope ();
+			scope.check_array ();
+			push_scope (scope.val.get_child_value (index));
+
+			return this;
+		}
+
+		public unowned ObjectReader end_element () throws Error {
+			pop_scope ();
+
+			return this;
+		}
+
 		public bool get_bool_value () throws Error {
 			return peek_scope ().get_value (VariantType.BOOLEAN).get_boolean ();
 		}
@@ -1456,11 +1532,16 @@ namespace Frida.XPC {
 		private class Scope {
 			public Variant val;
 			public VariantDict? dict;
+			public bool is_array = false;
 
 			public Scope (Variant v) {
 				val = v;
-				if (v.get_type ().equal (VariantType.VARDICT))
+
+				VariantType t = v.get_type ();
+				if (t.equal (VariantType.VARDICT))
 					dict = new VariantDict (v);
+				else if (t.is_subtype_of (VariantType.ARRAY))
+					is_array = true;
 			}
 
 			public Variant get_value (VariantType expected_type) throws Error {
@@ -1471,6 +1552,11 @@ namespace Frida.XPC {
 				}
 
 				return val;
+			}
+
+			public void check_array () throws Error {
+				if (!is_array)
+					throw new Error.PROTOCOL ("Array expected");
 			}
 		}
 	}
