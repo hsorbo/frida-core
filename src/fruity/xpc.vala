@@ -9,14 +9,15 @@ namespace Frida.XPC {
 		construct {
 			_main_context = MainContext.ref_thread_default ();
 
-			printerr ("[PairingBrowser %p]\n", this);
 			_backend = _create_backend (this);
 		}
 
 		~PairingBrowser () {
-			printerr ("[~PairingBrowser %p]\n", this);
 			_destroy_backend (_backend);
 		}
+
+		public extern static void * _create_backend (PairingBrowser browser);
+		public extern static void _destroy_backend (void * backend);
 
 		public void _on_match (PairingService service) {
 			var source = new IdleSource ();
@@ -27,8 +28,28 @@ namespace Frida.XPC {
 			source.attach (_main_context);
 		}
 
-		public extern static void * _create_backend (PairingBrowser browser);
-		public extern static void _destroy_backend (void * backend);
+		public class Operation<T> {
+			public SourceFunc callback;
+
+			public T? result;
+			public Error? error;
+
+			public Operation (owned SourceFunc callback) {
+				this.callback = (owned) callback;
+			}
+
+			public void complete (MainContext main_context, owned Error? e) {
+				error = (owned) e;
+
+				var source = new IdleSource ();
+				source.set_callback (() => {
+					callback ();
+					callback = null;
+					return Source.REMOVE;
+				});
+				source.attach (main_context);
+			}
+		}
 	}
 
 	public class PairingService : Object {
@@ -63,31 +84,6 @@ namespace Frida.XPC {
 			return @"PairingService { name: \"$name\", interface_index: $interface_index, interface_name: \"$interface_name\" }";
 		}
 
-		public class ResolveOperation {
-			public weak PairingService parent;
-			public SourceFunc callback;
-
-			public Gee.List<PairingServiceHost> hosts = new Gee.ArrayList<PairingServiceHost> ();
-			public Error? error;
-
-			public ResolveOperation (PairingService parent, owned SourceFunc callback) {
-				this.parent = parent;
-				this.callback = (owned) callback;
-			}
-
-			public void complete (MainContext main_context, owned Error? e) {
-				error = (owned) e;
-
-				var source = new IdleSource ();
-				source.set_callback (() => {
-					callback ();
-					callback = null;
-					return Source.REMOVE;
-				});
-				source.attach (main_context);
-			}
-		}
-
 		public extern void _schedule_resolve (ResolveOperation op);
 	}
 
@@ -110,6 +106,18 @@ namespace Frida.XPC {
 		public Bytes txt_record {
 			get;
 			construct;
+		}
+
+		public async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable = null) throws Error, IOError {
+			var op = new ResolveOperation (this, resolve.callback);
+
+			_schedule_resolve (op);
+			yield;
+
+			if (op.error != null)
+				throw op.error;
+
+			return op.hosts;
 		}
 
 		public string to_string () {
