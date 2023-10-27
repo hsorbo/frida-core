@@ -15,8 +15,8 @@ struct _FridaXPCPairingBrowserBackend
   dispatch_queue_t queue;
   DNSServiceRef dns_connection;
   GPtrArray * dns_sessions;
-  GQueue resolve_operations;
-  gboolean resolve_in_progress;
+  GQueue operations;
+  gboolean operation_in_progress;
 };
 
 static void frida_xpc_pairing_browser_backend_start (FridaXPCPairingBrowserBackend * self);
@@ -42,7 +42,7 @@ _frida_xpc_pairing_browser_create_backend (FridaXPCPairingBrowser * browser)
   backend->browser = browser;
   backend->queue = dispatch_queue_create ("re.frida.fruity.queue", DISPATCH_QUEUE_SERIAL);
   backend->dns_sessions = g_ptr_array_new_with_free_func ((GDestroyNotify) DNSServiceRefDeallocate);
-  g_queue_init (&backend->resolve_operations);
+  g_queue_init (&backend->operations);
 
   dispatch_async (backend->queue, ^{ frida_xpc_pairing_browser_backend_start (backend); });
 
@@ -56,7 +56,7 @@ _frida_xpc_pairing_browser_destroy_backend (void * backend)
 
   dispatch_sync (b->queue, ^{ frida_xpc_pairing_browser_backend_stop (backend); });
 
-  g_assert (g_queue_is_empty (&b->resolve_operations));
+  g_assert (g_queue_is_empty (&b->operations));
   g_ptr_array_unref (b->dns_sessions);
   dispatch_release (b->queue);
 
@@ -122,7 +122,7 @@ static void
 frida_xpc_pairing_browser_backend_schedule_resolve_operation (FridaXPCPairingBrowserBackend * self,
     FridaXPCPairingServiceResolveOperation * op)
 {
-  g_queue_push_tail (&self->resolve_operations, op);
+  g_queue_push_tail (&self->operations, op);
   frida_xpc_pairing_browser_backend_maybe_perform_next_resolve_operation (self);
 }
 
@@ -134,12 +134,12 @@ frida_xpc_pairing_browser_backend_maybe_perform_next_resolve_operation (FridaXPC
   DNSServiceRef session;
   DNSServiceErrorType res;
 
-  if (self->resolve_in_progress || g_queue_is_empty (&self->resolve_operations))
+  if (self->operation_in_progress || g_queue_is_empty (&self->operations))
     return;
 
-  self->resolve_in_progress = TRUE;
+  self->operation_in_progress = TRUE;
 
-  op = g_queue_peek_head (&self->resolve_operations);
+  op = g_queue_peek_head (&self->operations);
   service = op->parent;
 
   session = self->dns_connection;
@@ -168,14 +168,14 @@ frida_xpc_pairing_browser_backend_complete_resolve_operation (FridaXPCPairingBro
 {
   FridaXPCPairingServiceResolveOperation * op;
 
-  op = g_queue_pop_head (&self->resolve_operations);
+  op = g_queue_pop_head (&self->operations);
 
   frida_xpc_pairing_service_resolve_operation_complete (op, self->browser->_main_context, error);
 
   if (error != NULL)
     g_error_free (error);
 
-  self->resolve_in_progress = FALSE;
+  self->operation_in_progress = FALSE;
   frida_xpc_pairing_browser_backend_maybe_perform_next_resolve_operation (self);
 }
 
@@ -189,7 +189,7 @@ frida_xpc_pairing_browser_backend_on_resolve_reply (DNSServiceRef sd_ref, DNSSer
   GBytes * txt_bytes;
   FridaXPCPairingServiceHost * host;
 
-  op = g_queue_peek_head (&self->resolve_operations);
+  op = g_queue_peek_head (&self->operations);
 
   if (error_code != kDNSServiceErr_NoError)
     goto propagate_error;
