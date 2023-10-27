@@ -3,22 +3,47 @@ namespace Frida.XPC {
 	public class PairingBrowser : Object {
 		public signal void service_discovered (PairingService service);
 
-		public MainContext _main_context;
-		public void * _backend;
+		private Darwin.DNSService dns_connection;
+		private Darwin.DNSService browse_session;
+		private Darwin.DispatchQueue queue = new Darwin.DispatchQueue ("re.frida.fruity.queue", Darwin.DispatchQueueAttr.SERIAL);
+		private MainContext main_context;
+
+		private const string REGTYPE = "_remotepairing._tcp";
+		private const string DOMAIN = "local.";
 
 		construct {
-			_main_context = MainContext.ref_thread_default ();
+			main_context = MainContext.ref_thread_default ();
 
-			_backend = _create_backend (this);
+			queue.schedule (() => {
+				Darwin.DNSService.create_connection (out dns_connection);
+				dns_connection.set_dispatch_queue (queue);
+
+				Darwin.DNSService session = dns_connection;
+				var err = Darwin.DNSService.browse (ref session, PrivateFive | ShareConnection, 0, REGTYPE, DOMAIN,
+					on_browse_reply);
+				browse_session = session;
+			});
 		}
 
 		~PairingBrowser () {
-			_destroy_backend (_backend);
+			queue.invoke (() => {
+				browse_session.deallocate ();
+				dns_connection.deallocate ();
+			});
 		}
 
-		public extern static void * _create_backend (PairingBrowser browser);
-		public extern static void _destroy_backend (void * backend);
+		private void on_browse_reply (Darwin.DNSService sd_ref, Darwin.DNSService.Flags flags, uint32 interface_index,
+				Darwin.DNSService.ErrorType error_code, string service_name, string regtype, string reply_domain) {
+			printerr ("on_browse_reply() service_name=\"%s\"\n", service_name);
 
+			Darwin.DNSService session = dns_connection;
+			Darwin.DNSService.resolve (ref session, PrivateFive | ShareConnection, interface_index, service_name, REGTYPE, DOMAIN,
+					(sd_ref, flags, interface_index, error_code, fullname, hosttarget, port, txt_len, txt_record) => {
+				printerr ("resolved to %s\n", hosttarget);
+			});
+		}
+
+#if 0
 		public void _on_match (PairingService service) {
 			var source = new IdleSource ();
 			source.set_callback (() => {
@@ -50,6 +75,7 @@ namespace Frida.XPC {
 				source.attach (main_context);
 			}
 		}
+#endif
 	}
 
 	public class PairingService : Object {
@@ -68,10 +94,11 @@ namespace Frida.XPC {
 			construct;
 		}
 
+#if 0
 		public async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable = null) throws Error, IOError {
 			var op = new ResolveOperation (this, resolve.callback);
 
-			_schedule_resolve (op);
+			//_schedule_resolve (op);
 			yield;
 
 			if (op.error != null)
@@ -79,14 +106,16 @@ namespace Frida.XPC {
 
 			return op.hosts;
 		}
+#endif
 
 		public string to_string () {
 			return @"PairingService { name: \"$name\", interface_index: $interface_index, interface_name: \"$interface_name\" }";
 		}
 
-		public extern void _schedule_resolve (ResolveOperation op);
+		//public extern void _schedule_resolve (ResolveOperation op);
 	}
 
+#if 0
 	public class PairingServiceHost : Object {
 		public string name {
 			get;
@@ -161,6 +190,7 @@ namespace Frida.XPC {
 			return summary.str;
 		}
 	}
+#endif
 
 	public class DiscoveryService : Object, AsyncInitable {
 		public Endpoint endpoint {
