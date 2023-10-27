@@ -1,55 +1,141 @@
 [CCode (gir_namespace = "FridaXPC", gir_version = "1.0")]
 namespace Frida.XPC {
-	public class PairingBrowser : Object {
-		public signal void service_discovered (PairingService service);
+	using Darwin.DNSSD;
+	using Darwin.GCD;
+	using Darwin.Net;
 
-		public MainContext _main_context;
-		public void * _backend;
+	private const string PAIRING_REGTYPE = "_remotepairing._tcp";
+	private const string PAIRING_DOMAIN = "local.";
+
+	public class PairingBrowser : Object {
+		public signal void services_discovered (PairingService[] services);
+
+		private MainContext main_context;
+		private DispatchQueue dispatch_queue = new DispatchQueue ("re.frida.fruity.queue", DispatchQueueAttr.SERIAL);
+
+		private DNSService dns_connection;
+		private DNSService browse_session;
+		private TaskQueue task_queue;
+
+		private Gee.List<PairingService> current_batch = new Gee.ArrayList<PairingService> ();
 
 		construct {
-			_main_context = MainContext.ref_thread_default ();
+			main_context = MainContext.ref_thread_default ();
 
-			_backend = _create_backend (this);
+			dispatch_queue.dispatch_async (() => {
+				DNSService.create_connection (out dns_connection);
+				dns_connection.set_dispatch_queue (dispatch_queue);
+
+				DNSService session = dns_connection;
+				var err = DNSService.browse (ref session, PrivateFive | ShareConnection, 0, PAIRING_REGTYPE, PAIRING_DOMAIN,
+					on_browse_reply);
+				browse_session = session;
+
+				task_queue = new TaskQueue (this);
+			});
 		}
 
 		~PairingBrowser () {
-			_destroy_backend (_backend);
+			dispatch_queue.dispatch_sync (() => {
+				browse_session.deallocate ();
+				dns_connection.deallocate ();
+			});
 		}
 
-		public extern static void * _create_backend (PairingBrowser browser);
-		public extern static void _destroy_backend (void * backend);
+		private void on_browse_reply (DNSService sd_ref, DNSService.Flags flags, uint32 interface_index,
+				DNSService.ErrorType error_code, string service_name, string regtype, string reply_domain) {
+			if (error_code != NoError)
+				return;
 
-		public void _on_match (PairingService service) {
-			var source = new IdleSource ();
-			source.set_callback (() => {
-				service_discovered (service);
+			var interface_name_buf = new char[IFNAMSIZ];
+			unowned string interface_name = if_indextoname (interface_index, interface_name_buf);
+
+			var service = new PairingService (service_name, interface_index, interface_name, task_queue);
+			current_batch.add (service);
+
+			if ((flags & DNSService.Flags.MoreComing) != 0)
+				return;
+
+			var services = current_batch;
+			current_batch = new Gee.ArrayList<PairingService> ();
+
+			schedule_on_frida_thread (() => {
+				services_discovered (services.to_array ());
 				return Source.REMOVE;
 			});
-			source.attach (_main_context);
 		}
 
-		public class Operation<T> {
-			public SourceFunc callback;
+		private void schedule_on_frida_thread (owned SourceFunc function) {
+			var source = new IdleSource ();
+			source.set_callback ((owned) function);
+			source.attach (main_context);
+		}
 
-			public T? result;
-			public Error? error;
+		private class TaskQueue : Object, DNSServiceProvider {
+			private weak PairingBrowser parent;
 
-			public Operation (owned SourceFunc callback) {
-				this.callback = (owned) callback;
+			private DNSServiceTask? current = null;
+			private Gee.Deque<DNSServiceTask> pending = new Gee.ArrayQueue<DNSServiceTask> ();
+
+			public TaskQueue (PairingBrowser parent) {
+				this.parent = parent;
 			}
 
-			public void complete (MainContext main_context, owned Error? e) {
-				error = (owned) e;
+			private async T with_dns_service<T> (DNSServiceTask task, Cancellable? cancellable) throws Error, IOError {
+				var promise = new Promise<Object> ();
+				task.set_data ("promise", promise);
+				pending.offer_tail (task);
 
-				var source = new IdleSource ();
-				source.set_callback (() => {
-					callback ();
-					callback = null;
+				maybe_start_next ();
+
+				return (T) yield promise.future.wait_async (cancellable);
+			}
+
+			private void maybe_start_next () {
+				if (current != null)
+					return;
+
+				DNSServiceTask? task = pending.poll_head ();
+				if (task == null)
+					return;
+				current = task;
+
+				parent.dispatch_queue.dispatch_async (() => {
+					current.dns_connection = parent.dns_connection;
+					current.on_complete = on_complete;
+					current.start ();
+				});
+			}
+
+			private void on_complete (Object? result, Error? error) {
+				parent.schedule_on_frida_thread (() => {
+					Promise<Object> promise = current.steal_data ("promise");
+
+					if (error != null)
+						promise.reject (error);
+					else
+						promise.resolve (result);
+
+					current = null;
+					maybe_start_next ();
+
 					return Source.REMOVE;
 				});
-				source.attach (main_context);
 			}
 		}
+	}
+
+	private interface DNSServiceProvider : Object {
+		public abstract async T with_dns_service<T> (DNSServiceTask task, Cancellable? cancellable) throws Error, IOError;
+	}
+
+	private abstract class DNSServiceTask : Object {
+		internal DNSService dns_connection;
+		internal CompleteFunc on_complete;
+
+		public delegate void CompleteFunc (Object? result, Error? error);
+
+		public abstract void start ();
 	}
 
 	public class PairingService : Object {
@@ -68,34 +154,69 @@ namespace Frida.XPC {
 			construct;
 		}
 
+		private DNSServiceProvider dns;
+
+		internal PairingService (string name, uint interface_index, string interface_name, DNSServiceProvider dns) {
+			Object (
+				name: name,
+				interface_index: interface_index,
+				interface_name: interface_name
+			);
+			this.dns = dns;
+		}
+
 		public async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable = null) throws Error, IOError {
-			var op = new ResolveOperation (this, resolve.callback);
+			var task = new ResolveTask (this);
+			return yield dns.with_dns_service (task, cancellable);
+		}
 
-			_schedule_resolve (op);
-			yield;
+		private class ResolveTask : DNSServiceTask {
+			private weak PairingService parent;
 
-			if (op.error != null)
-				throw op.error;
+			private DNSService session;
+			private Gee.List<PairingServiceHost> hosts = new Gee.ArrayList<PairingServiceHost> ();
 
-			return op.hosts;
+			public ResolveTask (PairingService parent) {
+				this.parent = parent;
+			}
+
+			public override void start () {
+				session = dns_connection;
+				DNSService.resolve (ref session, PrivateFive | ShareConnection, parent.interface_index, parent.name,
+					PAIRING_REGTYPE, PAIRING_DOMAIN, on_resolve_reply);
+			}
+
+			private void on_resolve_reply (DNSService sd_ref, DNSService.Flags flags, uint32 interface_index,
+					DNSService.ErrorType error_code, string fullname, string hosttarget, uint16 port,
+					uint8[] txt_record) {
+				if (error_code != NoError) {
+					session.deallocate ();
+					on_complete (null,
+						new Error.TRANSPORT ("Unable to resolve service '%s' on interface %s",
+							parent.name, parent.interface_name));
+					return;
+				}
+
+				hosts.add (new PairingServiceHost (parent, hosttarget, uint16.from_big_endian (port),
+					new Bytes (txt_record), parent.dns));
+
+				if ((flags & DNSService.Flags.MoreComing) == 0) {
+					session.deallocate ();
+					on_complete (hosts, null);
+				}
+			}
 		}
 
 		public string to_string () {
-			return @"PairingService { name: \"$name\", interface_index: $interface_index, interface_name: \"$interface_name\" }";
+			return @"PairingService { name: \"$name\", interface_index: $interface_index," +
+				@" interface_name: \"$interface_name\" }";
 		}
-
-		public extern void _schedule_resolve (ResolveOperation op);
 	}
 
 	public class PairingServiceHost : Object {
 		public string name {
 			get;
 			construct;
-		}
-
-		public Gee.List<SocketAddress> addresses {
-			get;
-			default = new Gee.ArrayList<SocketAddress> ();
 		}
 
 		public uint16 port {
@@ -108,57 +229,61 @@ namespace Frida.XPC {
 			construct;
 		}
 
-		public async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable = null) throws Error, IOError {
-			var op = new ResolveOperation (this, resolve.callback);
+		private PairingService service;
+		private DNSServiceProvider dns;
 
-			_schedule_resolve (op);
-			yield;
+		internal PairingServiceHost (PairingService service, string name, uint16 port, Bytes txt_record, DNSServiceProvider dns) {
+			Object (
+				name: name,
+				port: port,
+				txt_record: txt_record
+			);
+			this.service = service;
+			this.dns = dns;
+		}
 
-			if (op.error != null)
-				throw op.error;
+		public async Gee.List<SocketAddress> resolve (Cancellable? cancellable = null) throws Error, IOError {
+			var task = new ResolveTask (this);
+			return yield dns.with_dns_service (task, cancellable);
+		}
 
-			return op.hosts;
+		private class ResolveTask : DNSServiceTask {
+			private weak PairingServiceHost parent;
+
+			private DNSService session;
+			private Gee.List<SocketAddress> addresses = new Gee.ArrayList<SocketAddress> ();
+
+			public ResolveTask (PairingServiceHost parent) {
+				this.parent = parent;
+			}
+
+			public override void start () {
+				session = dns_connection;
+				DNSService.get_addr_info (ref session, PrivateFive | ShareConnection, parent.service.interface_index, IPv6,
+					parent.name, on_info_reply);
+			}
+
+			private void on_info_reply (DNSService sd_ref, DNSService.Flags flags, uint32 interface_index,
+					DNSService.ErrorType error_code, string hostname, void * address, uint32 ttl) {
+				if (error_code != NoError) {
+					session.deallocate ();
+					on_complete (null,
+						new Error.TRANSPORT ("Unable to resolve host '%s' on interface %s",
+							parent.name, parent.service.interface_name));
+					return;
+				}
+
+				addresses.add (new NativeSocketAddress (address, sizeof (Posix.SockAddrIn6)));
+
+				if ((flags & DNSService.Flags.MoreComing) == 0) {
+					session.deallocate ();
+					on_complete (addresses, null);
+				}
+			}
 		}
 
 		public string to_string () {
-			var summary = new StringBuilder.sized (128);
-
-			summary.append (@"PairingServiceHost { name: \"$name\", addresses: [");
-
-			uint i = 0;
-			foreach (var addr in addresses) {
-				if (i != 0)
-					summary.append (", ");
-
-				var native_size = addr.get_native_size ();
-				var native = new uint8[native_size];
-				try {
-					addr.to_native (native, native_size);
-				} catch (GLib.Error e) {
-					assert_not_reached ();
-				}
-				hexdump (native);
-
-				var desc = new StringBuilder.sized (32);
-				for (uint j = 0; j != 16; j += 2) {
-					uint8 b1 = native[8 + j];
-					uint8 b2 = native[8 + j + 1];
-					if (desc.len == 0 || (b1 != 0 || b2 != 0)) {
-						if (desc.len != 0)
-							desc.append_c (':');
-						desc.append_printf ("%02x%02x", b1, b2);
-					}
-				}
-
-				var scope_id = (uint32 *) ((uint8 *) native + 8 + 16);
-				summary.append_printf ("(%s, scope_id: %u)", desc.str, *scope_id);
-
-				i++;
-			}
-
-			summary.append (@"], port: $port, txt_record: <$(txt_record.length) bytes> }");
-
-			return summary.str;
+			return @"PairingServiceHost { name: \"$name\", port: $port, txt_record: <$(txt_record.length) bytes> }";
 		}
 	}
 
