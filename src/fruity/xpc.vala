@@ -1,24 +1,157 @@
 [CCode (gir_namespace = "FridaXPC", gir_version = "1.0")]
 namespace Frida.XPC {
 	public class PairingBrowser : Object {
-		public signal void service_discovered (string name, string host, uint16 port, Bytes txt_record);
+		public signal void service_discovered (PairingService service);
 
+		public MainContext _main_context;
 		public void * _backend;
 
 		construct {
+			_main_context = MainContext.ref_thread_default ();
+
+			printerr ("[PairingBrowser %p]\n", this);
 			_backend = _create_backend (this);
 		}
 
 		~PairingBrowser () {
+			printerr ("[~PairingBrowser %p]\n", this);
 			_destroy_backend (_backend);
 		}
 
-		public void _on_match (string name, string host, uint16 port, Bytes txt_record) {
-			service_discovered (name, host, port, txt_record);
+		public void _on_match (PairingService service) {
+			var source = new IdleSource ();
+			source.set_callback (() => {
+				service_discovered (service);
+				return Source.REMOVE;
+			});
+			source.attach (_main_context);
 		}
 
 		public extern static void * _create_backend (PairingBrowser browser);
 		public extern static void _destroy_backend (void * backend);
+	}
+
+	public class PairingService : Object {
+		public string name {
+			get;
+			construct;
+		}
+
+		public uint interface_index {
+			get;
+			construct;
+		}
+
+		public string interface_name {
+			get;
+			construct;
+		}
+
+		public async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable = null) throws Error, IOError {
+			var op = new ResolveOperation (this, resolve.callback);
+
+			_schedule_resolve (op);
+			yield;
+
+			if (op.error != null)
+				throw op.error;
+
+			return op.hosts;
+		}
+
+		public string to_string () {
+			return @"PairingService { name: \"$name\", interface_index: $interface_index, interface_name: \"$interface_name\" }";
+		}
+
+		public class ResolveOperation {
+			public weak PairingService parent;
+			public SourceFunc callback;
+
+			public Gee.List<PairingServiceHost> hosts = new Gee.ArrayList<PairingServiceHost> ();
+			public Error? error;
+
+			public ResolveOperation (PairingService parent, owned SourceFunc callback) {
+				this.parent = parent;
+				this.callback = (owned) callback;
+			}
+
+			public void complete (MainContext main_context, owned Error? e) {
+				error = (owned) e;
+
+				var source = new IdleSource ();
+				source.set_callback (() => {
+					callback ();
+					callback = null;
+					return Source.REMOVE;
+				});
+				source.attach (main_context);
+			}
+		}
+
+		public extern void _schedule_resolve (ResolveOperation op);
+	}
+
+	public class PairingServiceHost : Object {
+		public string name {
+			get;
+			construct;
+		}
+
+		public Gee.List<SocketAddress> addresses {
+			get;
+			default = new Gee.ArrayList<SocketAddress> ();
+		}
+
+		public uint16 port {
+			get;
+			construct;
+		}
+
+		public Bytes txt_record {
+			get;
+			construct;
+		}
+
+		public string to_string () {
+			var summary = new StringBuilder.sized (128);
+
+			summary.append (@"PairingServiceHost { name: \"$name\", addresses: [");
+
+			uint i = 0;
+			foreach (var addr in addresses) {
+				if (i != 0)
+					summary.append (", ");
+
+				var native_size = addr.get_native_size ();
+				var native = new uint8[native_size];
+				try {
+					addr.to_native (native, native_size);
+				} catch (GLib.Error e) {
+					assert_not_reached ();
+				}
+				hexdump (native);
+
+				var desc = new StringBuilder.sized (32);
+				for (uint j = 0; j != 16; j += 2) {
+					uint8 b1 = native[8 + j];
+					uint8 b2 = native[8 + j + 1];
+					if (desc.len == 0 || (b1 != 0 || b2 != 0)) {
+						if (desc.len != 0)
+							desc.append_c (':');
+						desc.append_printf ("%02x%02x", b1, b2);
+					}
+				}
+
+				var scope_id = (uint32 *) ((uint8 *) native + 8 + 16);
+				summary.append_printf ("(%s, scope_id: %u)", desc.str, *scope_id);
+
+				i++;
+			}
+
+			summary.append (@"], port: $port, txt_record: <$(txt_record.length) bytes> }");
+
+			return summary.str;
+		}
 	}
 
 	public class DiscoveryService : Object, AsyncInitable {
@@ -130,7 +263,91 @@ namespace Frida.XPC {
 		}
 	}
 
-	public class AppService : CoreDeviceService {
+#if 0
+	public class TunnelService : Object, AsyncInitable {
+		public Endpoint endpoint {
+			get;
+			construct;
+		}
+
+		private Cancellable io_cancellable = new Cancellable ();
+
+		private Connection connection;
+
+		public static async TunnelService open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new TunnelService (endpoint);
+
+			try {
+				yield service.init_async (Priority.DEFAULT, cancellable);
+			} catch (GLib.Error e) {
+				throw_api_error (e);
+			}
+
+			return service;
+		}
+
+		private TunnelService (Endpoint endpoint) {
+			Object (endpoint: endpoint);
+		}
+
+		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
+			connection = yield Connection.open (endpoint, cancellable);
+			connection.activate ();
+
+			return true;
+		}
+
+		public void close () {
+			connection.cancel ();
+		}
+
+		public async void attempt_pair_verify (Cancellable? cancellable = null) throws Error, IOError {
+			var request = new BodyBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("request")
+					.begin_dictionary ()
+					.end_dictionary ()
+				.end_dictionary ()
+
+			if (input != null)
+				request.add_raw_value (input);
+			else
+				request.add_null_value ();
+
+			request
+					.set_member_name ("CoreDevice.invocationIdentifier")
+					.add_string_value ("CF561B2E-9E2B-46C8-A666-53A0BDAEE2E6")
+					.set_member_name ("CoreDevice.CoreDeviceDDIProtocolVersion")
+					.add_int64_value (0)
+					.set_member_name ("CoreDevice.coreDeviceVersion")
+					.begin_dictionary ()
+						.set_member_name ("originalComponentsCount")
+						.add_int64_value (2)
+						.set_member_name ("components")
+						.begin_array ()
+							.add_uint64_value (348)
+							.add_uint64_value (1)
+							.add_uint64_value (0)
+							.add_uint64_value (0)
+							.add_uint64_value (0)
+						.end_array ()
+						.set_member_name ("stringValue")
+						.add_string_value ("348.1")
+					.end_dictionary ()
+					.set_member_name ("CoreDevice.deviceIdentifier")
+					.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
+				.end_dictionary ();
+
+			Message raw_response = yield connection.request (request.build ());
+
+			var response = new ObjectReader (raw_response.body);
+			response.read_member ("CoreDevice.output");
+			return response;
+		}
+	}
+#endif
+
+	public class AppService : TrustedService {
 		public static async AppService open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
 			var service = new AppService (endpoint);
 
@@ -337,7 +554,7 @@ namespace Frida.XPC {
 		}
 	}
 
-	public abstract class CoreDeviceService : Object, AsyncInitable {
+	public abstract class TrustedService : Object, AsyncInitable {
 		public Endpoint endpoint {
 			get;
 			construct;
@@ -1718,7 +1935,7 @@ namespace Frida.XPC {
 	}
 
 	// https://gist.github.com/phako/96b36b5070beaf7eee27
-	private void hexdump (uint8[] data) {
+	public void hexdump (uint8[] data) {
 		var builder = new StringBuilder.sized (16);
 		var i = 0;
 
