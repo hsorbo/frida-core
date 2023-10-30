@@ -863,7 +863,7 @@ namespace Frida.XPC {
 
 		private Cancellable io_cancellable = new Cancellable ();
 
-		private Error? pending_error = null;
+		private Error? pending_error;
 
 		private Promise<bool> ready = new Promise<bool> ();
 		private Message? root_helo;
