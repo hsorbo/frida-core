@@ -130,12 +130,24 @@ namespace Frida.XPC {
 	}
 
 	private abstract class DNSServiceTask : Object {
-		internal DNSService dns_connection;
-		internal CompleteFunc on_complete;
+		internal DNSService? dns_connection;
+		internal CompleteFunc? on_complete;
+
+		protected DNSService? session;
 
 		public delegate void CompleteFunc (Object? result, Error? error);
 
 		public abstract void start ();
+
+		protected void complete (Object? result, Error? error) {
+			if (session != null && session != dns_connection) {
+				session.deallocate ();
+				session = null;
+			}
+
+			on_complete (result, error);
+			on_complete = null;
+		}
 	}
 
 	public class PairingService : Object {
@@ -173,7 +185,6 @@ namespace Frida.XPC {
 		private class ResolveTask : DNSServiceTask {
 			private weak PairingService parent;
 
-			private DNSService session;
 			private Gee.List<PairingServiceHost> hosts = new Gee.ArrayList<PairingServiceHost> ();
 
 			public ResolveTask (PairingService parent) {
@@ -190,8 +201,7 @@ namespace Frida.XPC {
 					DNSService.ErrorType error_code, string fullname, string hosttarget, uint16 port,
 					uint8[] txt_record) {
 				if (error_code != NoError) {
-					session.deallocate ();
-					on_complete (null,
+					complete (null,
 						new Error.TRANSPORT ("Unable to resolve service '%s' on interface %s",
 							parent.name, parent.interface_name));
 					return;
@@ -200,10 +210,8 @@ namespace Frida.XPC {
 				hosts.add (new PairingServiceHost (parent, hosttarget, uint16.from_big_endian (port),
 					new Bytes (txt_record), parent.dns));
 
-				if ((flags & DNSService.Flags.MoreComing) == 0) {
-					session.deallocate ();
-					on_complete (hosts, null);
-				}
+				if ((flags & DNSService.Flags.MoreComing) == 0)
+					complete (hosts, null);
 			}
 		}
 
@@ -250,7 +258,6 @@ namespace Frida.XPC {
 		private class ResolveTask : DNSServiceTask {
 			private weak PairingServiceHost parent;
 
-			private DNSService session;
 			private Gee.List<SocketAddress> addresses = new Gee.ArrayList<SocketAddress> ();
 
 			public ResolveTask (PairingServiceHost parent) {
@@ -266,8 +273,7 @@ namespace Frida.XPC {
 			private void on_info_reply (DNSService sd_ref, DNSService.Flags flags, uint32 interface_index,
 					DNSService.ErrorType error_code, string hostname, void * address, uint32 ttl) {
 				if (error_code != NoError) {
-					session.deallocate ();
-					on_complete (null,
+					complete (null,
 						new Error.TRANSPORT ("Unable to resolve host '%s' on interface %s",
 							parent.name, parent.service.interface_name));
 					return;
@@ -275,10 +281,8 @@ namespace Frida.XPC {
 
 				addresses.add (new NativeSocketAddress (address, sizeof (Posix.SockAddrIn6)));
 
-				if ((flags & DNSService.Flags.MoreComing) == 0) {
-					session.deallocate ();
-					on_complete (addresses, null);
-				}
+				if ((flags & DNSService.Flags.MoreComing) == 0)
+					complete (addresses, null);
 			}
 		}
 
