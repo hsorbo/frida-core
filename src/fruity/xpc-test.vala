@@ -14,26 +14,29 @@ namespace Frida.XPC {
 
 	private async void test_xpc () {
 		try {
-			Endpoint? disco_ep = null;
+			PairingService[]? services = null;
+
 			var browser = new PairingBrowser ();
-			browser.services_discovered.connect ((services) => {
-				printerr ("Found %u services\n", services.length);
-				foreach (var service in services) {
-					printerr ("\t%s\n", service.to_string ());
-					dump_service.begin (service);
-				}
-				/*
-				if (disco_ep == null && service.host.has_prefix ("OA.")) {
-					disco_ep = new Endpoint (service.host, 58783);
+			browser.services_discovered.connect (s => {
+				printerr ("Found %u services\n", s.length);
+				if (services == null) {
+					services = s;
 					test_xpc.callback ();
 				}
-				*/
 			});
 			yield;
 
-			printerr ("Got to the disco_ep: %s\n", disco_ep.to_string ());
-			var disco = yield DiscoveryService.open (disco_ep, cancellable);
-			printerr ("Got disco! %p\n", disco);
+			printerr ("\n=== Got:\n");
+			foreach (var service in services) {
+				printerr ("\t%s\n", service.to_string ());
+				yield dump_service (service);
+			}
+			printerr ("\n");
+
+			var disco = yield connect_to_first (services, cancellable);
+			printerr ("Opened the disco: %p\n", disco);
+
+			yield;
 		} catch (Error e) {
 			printerr ("%s\n", e.message);
 		} catch (IOError e) {
@@ -41,24 +44,57 @@ namespace Frida.XPC {
 		}
 	}
 
+	private async DiscoveryService connect_to_first (PairingService[] services, Cancellable? cancellable) throws Error, IOError {
+		foreach (PairingService service in services) {
+			foreach (PairingServiceHost host in yield service.resolve (cancellable)) {
+				foreach (InetSocketAddress address in yield host.resolve (cancellable)) {
+					SocketConnection connection;
+					try {
+						printerr ("Trying %s -> %s -> %s\n", service.to_string (), host.to_string (),
+							socket_address_to_string (address));
+						printerr (" => %s\n", address.to_string ());
+
+						NetworkAddress address_with_port = NetworkAddress.parse (
+							"[%s]".printf (address.to_string ()), 58783);
+						printerr (" => %s\n", address_with_port.to_string ());
+
+						var client = new SocketClient ();
+						connection = yield client.connect_async (address_with_port, cancellable);
+					} catch (GLib.Error e) {
+						printerr ("\tSkipping: %s\n", e.message);
+						continue;
+					}
+
+					Tcp.enable_nodelay (connection.socket);
+
+					try {
+						return yield DiscoveryService.open (connection, cancellable);
+					} catch (Error e) {
+						printerr ("\tSkipping: %s\n", e.message);
+						continue;
+					}
+				}
+			}
+		}
+		throw new Error.TRANSPORT ("Unable to connect to any of the services");
+	}
+
 	private async void dump_service (PairingService service) {
 		try {
-			printerr ("[%p] dump_service()\n", service);
 			var hosts = yield service.resolve (cancellable);
-			printerr ("[%p] Got %u hosts\n", service, hosts.size);
 			uint i = 0;
 			foreach (var host in hosts) {
-				printerr ("[%p]\thosts[%u]: %s\n", service, i, host.to_string ());
+				printerr ("\t\thosts[%u]: %s\n", i, host.to_string ());
 				var addresses = yield host.resolve (cancellable);
 				uint j = 0;
 				foreach (var addr in addresses) {
-					printerr ("[%p]\t\taddresses[%u]: %s\n", service, j, socket_address_to_string (addr));
+					printerr ("\t\t\taddresses[%u]: %s\n", j, socket_address_to_string (addr));
 					j++;
 				}
 				i++;
 			}
 		} catch (Error e) {
-			printerr ("[%p] %s\n", service, e.message);
+			printerr ("%s\n", e.message);
 		} catch (IOError e) {
 			assert_not_reached ();
 		}
@@ -75,13 +111,13 @@ namespace Frida.XPC {
 
 		var desc = new StringBuilder.sized (32);
 		for (uint j = 0; j != 16; j += 2) {
+			if (desc.len != 0)
+				desc.append_c (':');
 			uint8 b1 = native[8 + j];
 			uint8 b2 = native[8 + j + 1];
-			if (desc.len == 0 || (b1 != 0 || b2 != 0)) {
-				if (desc.len != 0)
-					desc.append_c (':');
+			bool all_zeroes = b1 == 0 && b2 == 0;
+			if (desc.len == 0 || !all_zeroes)
 				desc.append_printf ("%02x%02x", b1, b2);
-			}
 		}
 
 		var scope_id = (uint32 *) ((uint8 *) native + 8 + 16);

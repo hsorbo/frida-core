@@ -27,7 +27,7 @@ namespace Frida.XPC {
 				dns_connection.set_dispatch_queue (dispatch_queue);
 
 				DNSService session = dns_connection;
-				var err = DNSService.browse (ref session, PrivateFive | ShareConnection, 0, PAIRING_REGTYPE, PAIRING_DOMAIN,
+				DNSService.browse (ref session, PrivateFive | ShareConnection, 0, PAIRING_REGTYPE, PAIRING_DOMAIN,
 					on_browse_reply);
 				browse_session = session;
 
@@ -250,7 +250,7 @@ namespace Frida.XPC {
 			this.dns = dns;
 		}
 
-		public async Gee.List<SocketAddress> resolve (Cancellable? cancellable = null) throws Error, IOError {
+		public async Gee.List<InetSocketAddress> resolve (Cancellable? cancellable = null) throws Error, IOError {
 			var task = new ResolveTask (this);
 			return yield dns.with_dns_service (task, cancellable);
 		}
@@ -258,7 +258,7 @@ namespace Frida.XPC {
 		private class ResolveTask : DNSServiceTask {
 			private weak PairingServiceHost parent;
 
-			private Gee.List<SocketAddress> addresses = new Gee.ArrayList<SocketAddress> ();
+			private Gee.List<InetSocketAddress> addresses = new Gee.ArrayList<InetSocketAddress> ();
 
 			public ResolveTask (PairingServiceHost parent) {
 				this.parent = parent;
@@ -279,7 +279,7 @@ namespace Frida.XPC {
 					return;
 				}
 
-				addresses.add (new NativeSocketAddress (address, sizeof (Posix.SockAddrIn6)));
+				addresses.add ((InetSocketAddress) SocketAddress.from_native (address, sizeof (Posix.SockAddrIn6)));
 
 				if ((flags & DNSService.Flags.MoreComing) == 0)
 					complete (addresses, null);
@@ -292,7 +292,7 @@ namespace Frida.XPC {
 	}
 
 	public class DiscoveryService : Object, AsyncInitable {
-		public Endpoint endpoint {
+		public IOStream stream {
 			get;
 			construct;
 		}
@@ -306,8 +306,8 @@ namespace Frida.XPC {
 		private Source? heartbeat_source;
 		private uint64 next_heartbeat_seqno = 1;
 
-		public static async DiscoveryService open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
-			var service = new DiscoveryService (endpoint);
+		public static async DiscoveryService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new DiscoveryService (stream);
 
 			try {
 				yield service.init_async (Priority.DEFAULT, cancellable);
@@ -318,12 +318,12 @@ namespace Frida.XPC {
 			return service;
 		}
 
-		private DiscoveryService (Endpoint endpoint) {
-			Object (endpoint: endpoint);
+		private DiscoveryService (IOStream stream) {
+			Object (stream: stream);
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			connection = yield Connection.open (endpoint, cancellable);
+			connection = new Connection (stream);
 			connection.close.connect (on_close);
 			connection.message.connect (on_message);
 			connection.activate ();
@@ -345,7 +345,7 @@ namespace Frida.XPC {
 			connection.cancel ();
 		}
 
-		public Endpoint get_service (string identifier) throws Error {
+		public ServiceInfo get_service (string identifier) throws Error {
 			var reader = new ObjectReader (handshake_body);
 			reader
 				.read_member ("Services")
@@ -353,7 +353,9 @@ namespace Frida.XPC {
 
 			var port = (uint16) uint.parse (reader.read_member ("Port").get_string_value ());
 
-			return new Endpoint (endpoint.host, port);
+			return new ServiceInfo () {
+				port = port,
+			};
 		}
 
 		private void on_close (Error? error) {
@@ -398,6 +400,10 @@ namespace Frida.XPC {
 			} catch (GLib.Error e) {
 			}
 		}
+	}
+
+	public class ServiceInfo {
+		public uint16 port;
 	}
 
 #if 0
@@ -485,8 +491,8 @@ namespace Frida.XPC {
 #endif
 
 	public class AppService : TrustedService {
-		public static async AppService open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
-			var service = new AppService (endpoint);
+		public static async AppService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new AppService (stream);
 
 			try {
 				yield service.init_async (Priority.DEFAULT, cancellable);
@@ -497,8 +503,8 @@ namespace Frida.XPC {
 			return service;
 		}
 
-		private AppService (Endpoint endpoint) {
-			Object (endpoint: endpoint);
+		private AppService (IOStream stream) {
+			Object (stream: stream);
 		}
 
 		public async Gee.List<ApplicationInfo> enumerate_applications (Cancellable? cancellable = null) throws Error, IOError {
@@ -692,7 +698,7 @@ namespace Frida.XPC {
 	}
 
 	public abstract class TrustedService : Object, AsyncInitable {
-		public Endpoint endpoint {
+		public IOStream stream {
 			get;
 			construct;
 		}
@@ -700,7 +706,7 @@ namespace Frida.XPC {
 		private Connection connection;
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			connection = yield Connection.open (endpoint, cancellable);
+			connection = new Connection (stream);
 			connection.activate ();
 
 			return true;
@@ -794,21 +800,6 @@ namespace Frida.XPC {
 			INACTIVE,
 			ACTIVE,
 			CLOSED,
-		}
-
-		public static async Connection open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
-			try {
-				NetworkAddress address = NetworkAddress.parse (endpoint.host, endpoint.port);
-
-				var client = new SocketClient ();
-				SocketConnection connection = yield client.connect_async (address, cancellable);
-
-				Tcp.enable_nodelay (connection.socket);
-
-				return new Connection (connection);
-			} catch (GLib.Error e) {
-				throw new Error.TRANSPORT ("%s", e.message);
-			}
 		}
 
 		public Connection (IOStream stream) {
