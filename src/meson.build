@@ -496,7 +496,11 @@ else
   fruity_sources += ['fruity/fruity-host-session-unix.c']
 endif
 if host_os_family == 'darwin'
-  backend_vala_args += ['--pkg=darwin-gcd', '--pkg=darwin-dns-sd']
+  backend_vala_args += [
+    '--pkg=darwin-gcd',
+    '--pkg=darwin-dns-sd',
+    '--pkg=darwin-net',
+  ]
 endif
 
 droidy_sources = [

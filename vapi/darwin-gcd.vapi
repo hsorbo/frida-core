@@ -1,5 +1,5 @@
-[CCode (cheader_filename = "dispatch/dispatch.h", cprefix = "", gir_namespace = "Darwin", gir_version = "1.0")]
-namespace Darwin {
+[CCode (cheader_filename = "dispatch/dispatch.h", gir_namespace = "Darwin", gir_version = "1.0")]
+namespace Darwin.GCD {
 	[Compact]
 	[CCode (cname = "struct dispatch_object_s", ref_function = "dispatch_retain", unref_function = "dispatch_release")]
 	public class DispatchQueue {
@@ -7,10 +7,10 @@ namespace Darwin {
 		public DispatchQueue (string label, DispatchQueueAttr attr);
 
 		[CCode (cname = "dispatch_async_f")]
-		public void schedule ([CCode (delegate_target_pos = 0.9)] DispatchFunction work);
+		public void dispatch_async ([CCode (delegate_target_pos = 0.9)] DispatchFunction work);
 
 		[CCode (cname = "dispatch_sync_f")]
-		public void invoke ([CCode (delegate_target_pos = 0.9)] DispatchFunction work);
+		public void dispatch_sync ([CCode (delegate_target_pos = 0.9)] DispatchFunction work);
 	}
 
 	[CCode (cname = "dispatch_function_t")]
