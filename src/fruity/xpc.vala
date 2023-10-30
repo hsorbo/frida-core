@@ -406,19 +406,20 @@ namespace Frida.XPC {
 		public uint16 port;
 	}
 
-#if 0
 	public class TunnelService : Object, AsyncInitable {
-		public Endpoint endpoint {
+		public IOStream stream {
 			get;
 			construct;
 		}
 
-		private Cancellable io_cancellable = new Cancellable ();
-
 		private Connection connection;
 
-		public static async TunnelService open (Endpoint endpoint, Cancellable? cancellable = null) throws Error, IOError {
-			var service = new TunnelService (endpoint);
+		private Gee.Map<uint64?, Promise<ObjectReader>> plain_requests =
+			new Gee.HashMap<uint64?, Promise<ObjectReader>> (Numeric.uint64_hash, Numeric.uint64_equal);
+		private uint64 next_sequence_number = 0;
+
+		public static async TunnelService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
+			var service = new TunnelService (stream);
 
 			try {
 				yield service.init_async (Priority.DEFAULT, cancellable);
@@ -429,13 +430,17 @@ namespace Frida.XPC {
 			return service;
 		}
 
-		private TunnelService (Endpoint endpoint) {
-			Object (endpoint: endpoint);
+		private TunnelService (IOStream stream) {
+			Object (stream: stream);
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			connection = yield Connection.open (endpoint, cancellable);
+			connection = new Connection (stream);
+			connection.close.connect (on_close);
+			connection.message.connect (on_message);
 			connection.activate ();
+
+			yield connection.wait_until_ready (cancellable);
 
 			return true;
 		}
@@ -444,51 +449,128 @@ namespace Frida.XPC {
 			connection.cancel ();
 		}
 
-		public async void attempt_pair_verify (Cancellable? cancellable = null) throws Error, IOError {
-			var request = new BodyBuilder ()
+		public async ObjectReader attempt_pair_verify (Cancellable? cancellable = null) throws Error, IOError {
+			var payload = new ObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("request")
 					.begin_dictionary ()
+						.set_member_name ("_0")
+						.begin_dictionary ()
+							.set_member_name ("handshake")
+							.begin_dictionary ()
+								.set_member_name ("_0")
+								.begin_dictionary ()
+									.set_member_name ("wireProtocolVersion")
+									.add_int64_value (19)
+									.set_member_name ("hostOptions")
+									.begin_dictionary ()
+										.set_member_name ("attemptPairVerify")
+										.add_bool_value (true)
+									.end_dictionary ()
+								.end_dictionary ()
+							.end_dictionary ()
+						.end_dictionary ()
 					.end_dictionary ()
-				.end_dictionary ()
-
-			if (input != null)
-				request.add_raw_value (input);
-			else
-				request.add_null_value ();
-
-			request
-					.set_member_name ("CoreDevice.invocationIdentifier")
-					.add_string_value ("CF561B2E-9E2B-46C8-A666-53A0BDAEE2E6")
-					.set_member_name ("CoreDevice.CoreDeviceDDIProtocolVersion")
-					.add_int64_value (0)
-					.set_member_name ("CoreDevice.coreDeviceVersion")
-					.begin_dictionary ()
-						.set_member_name ("originalComponentsCount")
-						.add_int64_value (2)
-						.set_member_name ("components")
-						.begin_array ()
-							.add_uint64_value (348)
-							.add_uint64_value (1)
-							.add_uint64_value (0)
-							.add_uint64_value (0)
-							.add_uint64_value (0)
-						.end_array ()
-						.set_member_name ("stringValue")
-						.add_string_value ("348.1")
-					.end_dictionary ()
-					.set_member_name ("CoreDevice.deviceIdentifier")
-					.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
 				.end_dictionary ();
 
-			Message raw_response = yield connection.request (request.build ());
+			ObjectReader response = yield request_plain (payload.build (), cancellable);
 
-			var response = new ObjectReader (raw_response.body);
-			response.read_member ("CoreDevice.output");
+			response
+				.read_member ("response")
+				.read_member ("_1")
+				.read_member ("handshake")
+				.read_member ("_0");
+
+			printerr ("attempt_pair_verify() got: %s\n", variant_to_pretty_string (response.current_object));
+
 			return response;
 		}
+
+		private async ObjectReader request_plain (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
+			uint64 seqno = next_sequence_number++;
+			var promise = new Promise<ObjectReader> ();
+			plain_requests[seqno] = promise;
+
+			var request = new BodyBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("mangledTypeName")
+					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
+					.set_member_name ("value")
+					.begin_dictionary ()
+						.set_member_name ("sequenceNumber")
+						.add_uint64_value (seqno)
+						.set_member_name ("originatedBy")
+						.add_string_value ("host")
+						.set_member_name ("message")
+						.begin_dictionary ()
+							.set_member_name ("plain")
+							.begin_dictionary ()
+								.set_member_name ("_0")
+								.add_raw_value (payload)
+							.end_dictionary ()
+						.end_dictionary ()
+					.end_dictionary ()
+				.end_dictionary ();
+
+			try {
+				yield connection.post (request.build ());
+			} catch (GLib.Error e) {
+				if (plain_requests.unset (seqno))
+					promise.reject (e);
+			}
+
+			return yield promise.future.wait_async (cancellable);
+		}
+
+		private void on_close (Error? error) {
+			var e = (error != null)
+				? error
+				: new Error.TRANSPORT ("Connection closed while waiting for response");
+			foreach (Promise<ObjectReader> promise in plain_requests.values)
+				promise.reject (e);
+			plain_requests.clear ();
+		}
+
+		private void on_message (Message msg) {
+			if (msg.body == null)
+				return;
+
+			var reader = new ObjectReader (msg.body);
+			try {
+				string type_name = reader
+					.read_member ("mangledTypeName")
+					.get_string_value ();
+				if (type_name != "RemotePairingDevice.ControlChannelMessageEnvelope")
+					return;
+				reader.end_member ();
+
+				reader.read_member ("value");
+
+				string origin = reader
+					.read_member ("originatedBy")
+					.get_string_value ();
+				if (origin != "device")
+					return;
+				reader.end_member ();
+
+				uint64 seqno = reader
+					.read_member ("sequenceNumber")
+					.get_uint64_value ();
+				reader.end_member ();
+
+				reader.read_member ("message")
+					.read_member ("plain")
+					.read_member ("_0");
+
+				Promise<ObjectReader> promise;
+				if (!plain_requests.unset (seqno, out promise))
+					return;
+
+				promise.resolve (reader);
+			} catch (Error e) {
+			}
+		}
 	}
-#endif
 
 	public class AppService : TrustedService {
 		public static async AppService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
@@ -783,6 +865,9 @@ namespace Frida.XPC {
 
 		private Error? pending_error = null;
 
+		private Promise<bool> ready = new Promise<bool> ();
+		private Message? root_helo;
+		private Message? reply_helo;
 		private Gee.Map<uint64?, PendingResponse> pending_responses =
 			new Gee.HashMap<uint64?, PendingResponse> (Numeric.uint64_hash, Numeric.uint64_equal);
 
@@ -894,6 +979,14 @@ namespace Frida.XPC {
 			io_cancellable.cancel ();
 		}
 
+		public async PeerInfo wait_until_ready (Cancellable? cancellable = null) throws Error, IOError {
+			yield ready.future.wait_async (cancellable);
+
+			return new PeerInfo () {
+				metadata = root_helo.body,
+			};
+		}
+
 		public async Message request (Bytes body, Cancellable? cancellable = null) throws Error, IOError {
 			uint64 request_id = make_message_id ();
 
@@ -902,6 +995,8 @@ namespace Frida.XPC {
 				.add_id (request_id)
 				.add_body (body)
 				.build ();
+
+			printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
 
 			bool waiting = false;
 
@@ -983,6 +1078,30 @@ namespace Frida.XPC {
 			}
 		}
 
+		public async void post (Bytes body, Cancellable? cancellable = null) throws Error, IOError {
+			Bytes raw_request = new MessageBuilder (MSG)
+				.add_id (make_message_id ())
+				.add_body (body)
+				.build ();
+
+			printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
+
+			yield root_stream.submit_data (raw_request, cancellable);
+		}
+
+		private void on_header (Message msg, Stream sender) {
+			if (sender == root_stream) {
+				if (root_helo == null)
+					root_helo = msg;
+			} else if (sender == reply_stream) {
+				if (reply_helo == null)
+					reply_helo = msg;
+			}
+
+			if (!ready.future.ready && root_helo != null && reply_helo != null)
+				ready.resolve (true);
+		}
+
 		private void on_reply (Message msg, Stream sender) {
 			if (sender != reply_stream)
 				return;
@@ -1032,13 +1151,16 @@ namespace Frida.XPC {
 				}
 			}
 
-			foreach (var r in pending_responses.values.to_array ()) {
-				r.complete_with_error (
-					(pending_error != null)
-						? pending_error
-						: new Error.TRANSPORT ("Connection closed"));
-			}
+			Error error = (pending_error != null)
+				? pending_error
+				: new Error.TRANSPORT ("Connection closed");
+
+			foreach (var r in pending_responses.values.to_array ())
+				r.complete_with_error (error);
 			pending_responses.clear ();
+
+			if (!ready.future.ready)
+				ready.reject (error);
 
 			state = CLOSED;
 
@@ -1290,11 +1412,20 @@ namespace Frida.XPC {
 					return 0;
 				incoming_message.remove_range (0, (uint) size);
 
-				if (msg.type == MSG) {
-					if ((msg.flags & MessageFlags.IS_REPLY) != 0)
-						parent.on_reply (msg, this);
-					else if ((msg.flags & (MessageFlags.WANTS_REPLY | MessageFlags.IS_REPLY)) == 0)
-						parent.message (msg);
+				printerr ("\n<<< [stream_id=%d] %s\n", id, msg.to_string ());
+
+				switch (msg.type) {
+					case HEADER:
+						parent.on_header (msg, this);
+						break;
+					case MSG:
+						if ((msg.flags & MessageFlags.IS_REPLY) != 0)
+							parent.on_reply (msg, this);
+						else if ((msg.flags & (MessageFlags.WANTS_REPLY | MessageFlags.IS_REPLY)) == 0)
+							parent.message (msg);
+						break;
+					case PING:
+						break;
 				}
 
 				return 0;
@@ -1302,24 +1433,8 @@ namespace Frida.XPC {
 		}
 	}
 
-	public class Endpoint : Object {
-		public string host {
-			get;
-			construct;
-		}
-
-		public uint16 port {
-			get;
-			construct;
-		}
-
-		public Endpoint (string host, uint16 port) {
-			Object (host: host, port: port);
-		}
-
-		public string to_string () {
-			return "Endpoint { host: \"%s\", port: %u }".printf (host, port);
-		}
+	public class PeerInfo {
+		public Variant? metadata;
 	}
 
 	public class MessageBuilder {
@@ -1451,63 +1566,6 @@ namespace Frida.XPC {
 			description.append ("\n}");
 
 			return description.str;
-		}
-
-		private static void print_variant (Variant v, StringBuilder sink, uint depth = 0, bool initial = true) {
-			VariantType type = v.get_type ();
-
-			if (type.is_basic ()) {
-				sink.append (v.print (false));
-				return;
-			}
-
-			if (type.equal (VariantType.VARDICT)) {
-				sink.append ("{\n");
-
-				var iter = new VariantIter (v);
-				string key;
-				Variant val;
-				while (iter.next ("{sv}", out key, out val)) {
-					append_indent (depth + 1, sink);
-
-					if ("." in key || "-" in key) {
-						sink
-							.append_c ('"')
-							.append (key)
-							.append_c ('"');
-					} else {
-						sink.append (key);
-					}
-					sink.append (": ");
-
-					print_variant (val, sink, depth + 1, false);
-
-					sink.append (",\n");
-				}
-
-				append_indent (depth, sink);
-				sink.append ("}");
-			} else if (type.is_array ()) {
-				sink.append ("[\n");
-
-				var iter = new VariantIter (v);
-				Variant? val;
-				while ((val = iter.next_value ()) != null) {
-					append_indent (depth + 1, sink);
-					print_variant (val, sink, depth + 1, false);
-					sink.append (",\n");
-				}
-
-				append_indent (depth, sink);
-				sink.append ("]");
-			} else {
-				sink.append (v.print (false));
-			}
-		}
-
-		private static void append_indent (uint depth, StringBuilder sink) {
-			for (uint i = 0; i != depth; i++)
-				sink.append_c ('\t');
 		}
 	}
 
@@ -1934,9 +1992,15 @@ namespace Frida.XPC {
 	}
 
 	public class ObjectReader {
-		public Variant object {
+		public Variant root_object {
 			get {
 				return scopes.peek_head ().val;
+			}
+		}
+
+		public Variant current_object {
+			get {
+				return scopes.peek_tail ().val;
 			}
 		}
 
@@ -2087,5 +2151,68 @@ namespace Frida.XPC {
 
 		if (i % 16 != 0)
 			printerr ("%s| %s\n", string.nfill ((16 - (i % 16)) * 3, ' '), builder.str);
+	}
+
+	private string variant_to_pretty_string (Variant v) {
+		var sink = new StringBuilder.sized (128);
+		print_variant (v, sink);
+		return (owned) sink.str;
+	}
+
+	private void print_variant (Variant v, StringBuilder sink, uint depth = 0, bool initial = true) {
+		VariantType type = v.get_type ();
+
+		if (type.is_basic ()) {
+			sink.append (v.print (false));
+			return;
+		}
+
+		if (type.equal (VariantType.VARDICT)) {
+			sink.append ("{\n");
+
+			var iter = new VariantIter (v);
+			string key;
+			Variant val;
+			while (iter.next ("{sv}", out key, out val)) {
+				append_indent (depth + 1, sink);
+
+				if ("." in key || "-" in key) {
+					sink
+						.append_c ('"')
+						.append (key)
+						.append_c ('"');
+				} else {
+					sink.append (key);
+				}
+				sink.append (": ");
+
+				print_variant (val, sink, depth + 1, false);
+
+				sink.append (",\n");
+			}
+
+			append_indent (depth, sink);
+			sink.append ("}");
+		} else if (type.is_array () && !type.equal (new VariantType.array (VariantType.BYTE))) {
+			sink.append ("[\n");
+
+			var iter = new VariantIter (v);
+			Variant? val;
+			while ((val = iter.next_value ()) != null) {
+				append_indent (depth + 1, sink);
+				print_variant (val, sink, depth + 1, false);
+				sink.append (",\n");
+			}
+
+			append_indent (depth, sink);
+			sink.append ("]");
+		} else {
+			sink.append (v.print (false));
+		}
+	}
+
+	private void append_indent (uint depth, StringBuilder sink) {
+		for (uint i = 0; i != depth; i++)
+			sink.append_c ('\t');
 	}
 }

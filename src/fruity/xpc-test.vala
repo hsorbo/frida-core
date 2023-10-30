@@ -33,8 +33,15 @@ namespace Frida.XPC {
 			}
 			printerr ("\n");
 
-			var disco = yield connect_to_first (services, cancellable);
-			printerr ("Opened the disco: %p\n", disco);
+			Device device = yield pick_device (services, cancellable);
+			printerr ("Opened device.address=\"%s\" disco=%p\n", device.address, device.disco);
+
+			var tunnel = yield TunnelService.open (
+				yield device.open_service ("com.apple.internal.dt.coredevice.untrusted.tunnelservice", cancellable),
+				cancellable);
+			printerr ("Opened TunnelService!\n");
+
+			yield tunnel.attempt_pair_verify (cancellable);
 
 			yield;
 		} catch (Error e) {
@@ -44,22 +51,22 @@ namespace Frida.XPC {
 		}
 	}
 
-	private async DiscoveryService connect_to_first (PairingService[] services, Cancellable? cancellable) throws Error, IOError {
+	private async Device pick_device (PairingService[] services, Cancellable? cancellable) throws Error, IOError {
 		foreach (PairingService service in services) {
 			foreach (PairingServiceHost host in yield service.resolve (cancellable)) {
 				foreach (InetSocketAddress address in yield host.resolve (cancellable)) {
+					string candidate_address = address.to_string ();
+
 					SocketConnection connection;
 					try {
 						printerr ("Trying %s -> %s -> %s\n", service.to_string (), host.to_string (),
 							socket_address_to_string (address));
-						printerr (" => %s\n", address.to_string ());
+						printerr ("\t(i.e., candidate_address: %s)\n", candidate_address);
 
-						NetworkAddress address_with_port = NetworkAddress.parse (
-							"[%s]".printf (address.to_string ()), 58783);
-						printerr (" => %s\n", address_with_port.to_string ());
+						NetworkAddress disco_address = NetworkAddress.parse (candidate_address, 58783);
 
 						var client = new SocketClient ();
-						connection = yield client.connect_async (address_with_port, cancellable);
+						connection = yield client.connect_async (disco_address, cancellable);
 					} catch (GLib.Error e) {
 						printerr ("\tSkipping: %s\n", e.message);
 						continue;
@@ -68,7 +75,11 @@ namespace Frida.XPC {
 					Tcp.enable_nodelay (connection.socket);
 
 					try {
-						return yield DiscoveryService.open (connection, cancellable);
+						var disco = yield DiscoveryService.open (connection, cancellable);
+						return new Device () {
+							address = candidate_address,
+							disco = disco,
+						};
 					} catch (Error e) {
 						printerr ("\tSkipping: %s\n", e.message);
 						continue;
@@ -77,6 +88,28 @@ namespace Frida.XPC {
 			}
 		}
 		throw new Error.TRANSPORT ("Unable to connect to any of the services");
+	}
+
+	private class Device {
+		public string address;
+		public DiscoveryService disco;
+
+		public async SocketConnection open_service (string service_name, Cancellable? cancellable) throws Error, IOError {
+			SocketConnection connection;
+			try {
+				ServiceInfo service_info = disco.get_service (service_name);
+				NetworkAddress service_address = NetworkAddress.parse (address, service_info.port);
+
+				var client = new SocketClient ();
+				connection = yield client.connect_async (service_address, cancellable);
+			} catch (GLib.Error e) {
+				throw new Error.TRANSPORT ("%s", e.message);
+			}
+
+			Tcp.enable_nodelay (connection.socket);
+
+			return connection;
+		}
 	}
 
 	private async void dump_service (PairingService service) {
