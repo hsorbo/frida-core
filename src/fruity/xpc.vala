@@ -418,6 +418,8 @@ namespace Frida.XPC {
 			new Gee.HashMap<uint64?, Promise<ObjectReader>> (Numeric.uint64_hash, Numeric.uint64_equal);
 		private uint64 next_sequence_number = 0;
 
+		private OpenSSL.PrivateKey? x25519_key;
+
 		public static async TunnelService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
 			var service = new TunnelService (stream);
 
@@ -432,6 +434,12 @@ namespace Frida.XPC {
 
 		private TunnelService (IOStream stream) {
 			Object (stream: stream);
+		}
+
+		construct {
+			var ctx = new OpenSSL.PrivateKeyContext.from_id (X25519);
+			ctx.keygen_init ();
+			ctx.keygen (ref x25519_key);
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -471,9 +479,10 @@ namespace Frida.XPC {
 							.end_dictionary ()
 						.end_dictionary ()
 					.end_dictionary ()
-				.end_dictionary ();
+				.end_dictionary ()
+				.build ();
 
-			ObjectReader response = yield request_plain (payload.build (), cancellable);
+			ObjectReader response = yield request_plain (payload, cancellable);
 
 			response
 				.read_member ("response")
@@ -482,6 +491,64 @@ namespace Frida.XPC {
 				.read_member ("_0");
 
 			printerr ("attempt_pair_verify() got: %s\n", variant_to_pretty_string (response.current_object));
+
+			return response;
+		}
+
+		public async ObjectReader verify_manual_pairing (Cancellable? cancellable = null) throws Error, IOError {
+			var start_params = new PairingParamsBuilder ()
+				.add_state (1)
+				.add_public_key (x25519_key)
+				.build ();
+
+			var payload = new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("kind")
+					.add_string_value ("verifyManualPairing")
+					.set_member_name ("startNewSession")
+					.add_bool_value (true)
+					.set_member_name ("data")
+					.add_data_value (start_params)
+				.end_dictionary ()
+				.build ();
+
+			var response = yield request_pairing_data (payload, cancellable);
+
+			printerr ("verify_manual_pairing() got: %s\n", variant_to_pretty_string (response.current_object));
+
+			return response;
+		}
+
+		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
+			var wrapper = new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("event")
+					.begin_dictionary ()
+						.set_member_name ("_0")
+						.begin_dictionary ()
+							.set_member_name ("pairingData")
+							.begin_dictionary ()
+								.set_member_name ("_0")
+								.add_raw_value (payload)
+							.end_dictionary ()
+						.end_dictionary ()
+					.end_dictionary ()
+				.end_dictionary ()
+				.build ();
+
+			ObjectReader response = yield request_plain (wrapper, cancellable);
+
+			response
+				.read_member ("event")
+				.read_member ("_0");
+
+			if (!response.has_member ("pairingData"))
+				throw new Error.PROTOCOL ("Pairing request failed: %s", response.current_object.print (false));
+
+			response
+				.read_member ("pairingData")
+				.read_member ("_0")
+				.read_member ("data");
 
 			return response;
 		}
@@ -510,10 +577,11 @@ namespace Frida.XPC {
 							.end_dictionary ()
 						.end_dictionary ()
 					.end_dictionary ()
-				.end_dictionary ();
+				.end_dictionary ()
+				.build ();
 
 			try {
-				yield connection.post (request.build ());
+				yield connection.post (request);
 			} catch (GLib.Error e) {
 				if (plain_requests.unset (seqno))
 					promise.reject (e);
@@ -570,6 +638,43 @@ namespace Frida.XPC {
 			} catch (Error e) {
 			}
 		}
+	}
+
+	private class PairingParamsBuilder {
+		private BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
+
+		public unowned PairingParamsBuilder add_state (uint8 state) {
+			begin_param (STATE)
+				.append_uint8 (1)
+				.append_uint8 (state);
+			return this;
+		}
+
+		public unowned PairingParamsBuilder add_public_key (OpenSSL.PrivateKey pkey) {
+			size_t pubkey_size = 0;
+			pkey.get_raw_public_key (null, ref pubkey_size);
+			var pubkey = new uint8[pubkey_size];
+			pkey.get_raw_public_key (pubkey, ref pubkey_size);
+
+			begin_param (PUBLIC_KEY)
+				.append_uint8 ((uint8) pubkey.length)
+				.append_data (pubkey);
+
+			return this;
+		}
+
+		private unowned BufferBuilder begin_param (PairingParamType type) {
+			return builder.append_uint8 (type);
+		}
+
+		public Bytes build () {
+			return builder.build ();
+		}
+	}
+
+	private enum PairingParamType {
+		PUBLIC_KEY = 3,
+		STATE = 6,
 	}
 
 	public class AppService : TrustedService {
@@ -838,7 +943,7 @@ namespace Frida.XPC {
 					.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
 				.end_dictionary ();
 
-			Message raw_response = yield connection.request (request.build ());
+			Message raw_response = yield connection.request (request.build (), cancellable);
 
 			var response = new ObjectReader (raw_response.body);
 			response.read_member ("CoreDevice.output");
@@ -863,7 +968,7 @@ namespace Frida.XPC {
 
 		private Cancellable io_cancellable = new Cancellable ();
 
-		private Error? pending_error = null;
+		private Error? pending_error;
 
 		private Promise<bool> ready = new Promise<bool> ();
 		private Message? root_helo;
@@ -1712,6 +1817,14 @@ namespace Frida.XPC {
 
 		public unowned ObjectBuilder add_uint64_value (uint64 val) {
 			begin_object (UINT64).append_uint64 (val);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_data_value (Bytes val) {
+			begin_object (DATA)
+				.append_uint32 (val.length)
+				.append_bytes (val)
+				.align (4);
 			return this;
 		}
 

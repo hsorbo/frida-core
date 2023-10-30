@@ -480,7 +480,6 @@ if have_fruity_backend
   backend_sources += [
     'fruity' / 'fruity-host-session.vala',
     'fruity' / 'xpc.vala',
-    'fruity' / 'xpc-glue.c',
     'fruity' / 'dtx.vala',
     'fruity' / 'lockdown.vala',
     'fruity' / 'installation-proxy.vala',
@@ -500,6 +499,7 @@ if have_fruity_backend
     backend_sources += 'fruity' / 'fruity-host-session-unix.c'
   endif
 
+  backend_vala_args += '--pkg=openssl'
   if host_os_family == 'darwin'
     backend_vala_args += [
       '--pkg=darwin-gcd',
