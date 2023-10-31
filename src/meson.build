@@ -477,7 +477,6 @@ socket_sources = [
 fruity_sources = [
   'fruity/fruity-host-session.vala',
   'fruity/xpc.vala',
-  'fruity/xpc-glue.c',
   'fruity/dtx.vala',
   'fruity/lockdown.vala',
   'fruity/installation-proxy.vala',
