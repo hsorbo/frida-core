@@ -3,6 +3,7 @@ namespace Frida.XPC {
 	using Darwin.DNSSD;
 	using Darwin.GCD;
 	using Darwin.Net;
+	using OpenSSL.Envelope;
 
 	private const string PAIRING_REGTYPE = "_remotepairing._tcp";
 	private const string PAIRING_DOMAIN = "local.";
@@ -418,7 +419,7 @@ namespace Frida.XPC {
 			new Gee.HashMap<uint64?, Promise<ObjectReader>> (Numeric.uint64_hash, Numeric.uint64_equal);
 		private uint64 next_sequence_number = 0;
 
-		private OpenSSL.PrivateKey? x25519_key;
+		private Key? x25519_key;
 
 		public static async TunnelService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
 			var service = new TunnelService (stream);
@@ -437,7 +438,7 @@ namespace Frida.XPC {
 		}
 
 		construct {
-			var ctx = new OpenSSL.PrivateKeyContext.from_id (X25519);
+			var ctx = new KeyContext.for_key_type (X25519);
 			ctx.keygen_init ();
 			ctx.keygen (ref x25519_key);
 		}
@@ -513,10 +514,41 @@ namespace Frida.XPC {
 				.build ();
 
 			var response = yield request_pairing_data (payload, cancellable);
+			printerr ("Got pairing params: %s\n", variant_to_pretty_string (response.current_object));
+			var peer_public_key = new Key.from_raw_public_key (X25519, null,
+				response
+					.read_member ("public-key")
+					.get_data_value ().get_data ());
 
-			Bytes raw_data = response.read_member ("data").get_data_value ();
-			Variant p = PairingParamsParser.parse (raw_data.get_data ());
-			printerr ("Got pairing params: %s\n", variant_to_pretty_string (p));
+			var ctx = new KeyContext.for_key (x25519_key);
+			ctx.derive_init ();
+			ctx.derive_set_peer (peer_public_key);
+			size_t encryption_key_size = 0;
+			ctx.derive (null, ref encryption_key_size);
+			var encryption_key = new uint8[encryption_key_size];
+			ctx.derive (encryption_key, ref encryption_key_size);
+
+			printerr ("Encryption key:\n");
+			hexdump (encryption_key);
+
+			var kdf = KeyDerivationFunction.fetch (null, KeyDerivationAlgorithm.HKDF);
+			var kdf_ctx = new KeyDerivationContext (kdf);
+			unowned string info = "Pair-Verify-Encrypt-Info";
+			unowned string salt = "Pair-Verify-Encrypt-Salt";
+			size_t return_size = OpenSSL.ParamReturnSize.UNMODIFIED;
+			OpenSSL.Param kdf_params[] = {
+				{ KeyDerivationParameter.DIGEST, UTF8_STRING, OpenSSL.ShortName.sha512.data, return_size },
+				{ KeyDerivationParameter.KEY, OCTET_STRING, encryption_key, return_size },
+				{ KeyDerivationParameter.INFO, OCTET_STRING, info.data, return_size },
+				{ KeyDerivationParameter.SALT, OCTET_STRING, salt.data, return_size },
+				{ null, INTEGER, null, return_size },
+			};
+			uint8 derived_key[32];
+			int res = kdf_ctx.derive (derived_key, kdf_params);
+			printerr ("derive() => %d\n", res);
+			hexdump (derived_key);
+
+			var foobar = new CipherContext ();
 
 			return response;
 		}
@@ -547,11 +579,13 @@ namespace Frida.XPC {
 			if (!response.has_member ("pairingData"))
 				throw new Error.PROTOCOL ("Pairing request failed: %s", response.current_object.print (false));
 
-			response
+			Bytes raw_data = response
 				.read_member ("pairingData")
-				.read_member ("_0");
-
-			return response;
+				.read_member ("_0")
+				.read_member ("data")
+				.get_data_value ();
+			Variant data = PairingParamsParser.parse (raw_data.get_data ());
+			return new ObjectReader (data);
 		}
 
 		private async ObjectReader request_plain (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
@@ -650,11 +684,11 @@ namespace Frida.XPC {
 			return this;
 		}
 
-		public unowned PairingParamsBuilder add_public_key (OpenSSL.PrivateKey pkey) {
+		public unowned PairingParamsBuilder add_public_key (Key key) {
 			size_t pubkey_size = 0;
-			pkey.get_raw_public_key (null, ref pubkey_size);
+			key.get_raw_public_key (null, ref pubkey_size);
 			var pubkey = new uint8[pubkey_size];
-			pkey.get_raw_public_key (pubkey, ref pubkey_size);
+			key.get_raw_public_key (pubkey, ref pubkey_size);
 
 			begin_param (PUBLIC_KEY, pubkey.length)
 				.append_data (pubkey);
