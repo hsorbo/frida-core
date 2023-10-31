@@ -15,17 +15,17 @@ namespace OpenSSL {
 
 			public int derive_init ();
 			public int derive_set_peer (Key peer);
-			public int derive (uint8 * key, ref size_t keylen);
+			public int derive ([CCode (array_length = false)] uint8[]? key, ref size_t keylen);
 		}
 
 		[Compact]
-		[CCode (cname = "EVP_PKEY", cprefix = "EVP_PKEY_", free_function = "EVP_PKEY_free")]
+		[CCode (cname = "EVP_PKEY", cprefix = "EVP_PKEY_")]
 		public class Key {
 			[CCode (cname = "EVP_PKEY_new_raw_public_key")]
 			public Key.from_raw_public_key (KeyType type, Engine? engine, uint8[] pub);
 
-			public int get_raw_public_key (uint8 * pub, ref size_t len);
-			public int get_raw_private_key (uint8 * priv, ref size_t len);
+			public int get_raw_public_key ([CCode (array_length = false)] uint8[]? pub, ref size_t len);
+			public int get_raw_private_key ([CCode (array_length = false)] uint8[]? priv, ref size_t len);
 		}
 
 		[CCode (cname = "int", cprefix = "EVP_PKEY_", has_type_id = false)]
@@ -58,13 +58,14 @@ namespace OpenSSL {
 		}
 
 		[Compact]
-		[CCode (cheader_filename = "openssl/kdf.h", cname = "EVP_KDF", cprefix = "EVP_KDF_", free_function = "EVP_KDF_free")]
+		[CCode (cheader_filename = "openssl/kdf.h", cname = "EVP_KDF", cprefix = "EVP_KDF_")]
 		public class KeyDerivationFunction {
 			public static KeyDerivationFunction? fetch (LibraryContext? ctx, string algorithm, string? properties = null);
 		}
 
 		[Compact]
-		[CCode (cheader_filename = "openssl/kdf.h", cname = "EVP_KDF_CTX", cprefix = "EVP_KDF_", free_function = "EVP_KDF_CTX_free")]
+		[CCode (cheader_filename = "openssl/kdf.h", cname = "EVP_KDF_CTX", cprefix = "EVP_KDF_",
+			free_function = "EVP_KDF_CTX_free")]
 		public class KeyDerivationContext {
 			[CCode (cname = "EVP_KDF_CTX_new")]
 			public KeyDerivationContext (KeyDerivationFunction kdf);
@@ -141,12 +142,16 @@ namespace OpenSSL {
 			public int encrypt_init (Cipher cipher,
 				[CCode (array_length = false)] uint8[] key,
 				[CCode (array_length = false)] uint8[] iv);
+			[CCode (cname = "EVP_EncryptUpdate")]
+			public int encrypt_update ([CCode (array_length = false)] uint8[] output, ref int outlen, uint8[] input);
+			[CCode (cname = "EVP_EncryptFinal")]
+			public int encrypt_final ([CCode (array_length = false)] uint8[] output, ref int outlen);
 		}
 
 		[Compact]
 		[CCode (cname = "EVP_CIPHER", cprefix = "EVP_CIPHER_")]
 		public class Cipher {
-			public Cipher? fetch (LibraryContext ctx, string algorithm, string? properties = null);
+			public static Cipher? fetch (LibraryContext? ctx, string algorithm, string? properties = null);
 		}
 	}
 
@@ -190,5 +195,6 @@ namespace OpenSSL {
 		public const string sha256;
 		public const string sha384;
 		public const string sha512;
+		public const string chacha20_poly1305;
 	}
 }

@@ -548,10 +548,18 @@ namespace Frida.XPC {
 			printerr ("derive() => %d\n", res);
 			hexdump (derived_key);
 
-			var foobar = new CipherContext ();
+			var cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
+			printerr ("got cipher: %p\n", cipher);
+			var cipher_ctx = new CipherContext ();
+			unowned string iv = "\x00\x00\x00\x00PV-Msg03";
+			printerr ("iv.data.length=%d\n", iv.data.length);
+			hexdump (iv.data[:12]);
+			res = cipher_ctx.encrypt_init (cipher, derived_key, iv.data[:12]);
+			printerr ("encrypt_init() => res=%d\n", res);
 
 			return response;
 		}
+
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
 			var wrapper = new ObjectBuilder ()
