@@ -514,7 +514,9 @@ namespace Frida.XPC {
 
 			var response = yield request_pairing_data (payload, cancellable);
 
-			printerr ("verify_manual_pairing() got: %s\n", variant_to_pretty_string (response.current_object));
+			Bytes raw_data = response.read_member ("data").get_data_value ();
+			Variant p = PairingParamsParser.parse (raw_data.get_data ());
+			printerr ("Got pairing params: %s\n", variant_to_pretty_string (p));
 
 			return response;
 		}
@@ -547,8 +549,7 @@ namespace Frida.XPC {
 
 			response
 				.read_member ("pairingData")
-				.read_member ("_0")
-				.read_member ("data");
+				.read_member ("_0");
 
 			return response;
 		}
@@ -644,8 +645,7 @@ namespace Frida.XPC {
 		private BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
 
 		public unowned PairingParamsBuilder add_state (uint8 state) {
-			begin_param (STATE)
-				.append_uint8 (1)
+			begin_param (STATE, 1)
 				.append_uint8 (state);
 			return this;
 		}
@@ -656,15 +656,16 @@ namespace Frida.XPC {
 			var pubkey = new uint8[pubkey_size];
 			pkey.get_raw_public_key (pubkey, ref pubkey_size);
 
-			begin_param (PUBLIC_KEY)
-				.append_uint8 ((uint8) pubkey.length)
+			begin_param (PUBLIC_KEY, pubkey.length)
 				.append_data (pubkey);
 
 			return this;
 		}
 
-		private unowned BufferBuilder begin_param (PairingParamType type) {
-			return builder.append_uint8 (type);
+		private unowned BufferBuilder begin_param (PairingParamType type, size_t size) {
+			return builder
+				.append_uint8 (type)
+				.append_uint8 ((uint8) size);
 		}
 
 		public Bytes build () {
@@ -672,8 +673,80 @@ namespace Frida.XPC {
 		}
 	}
 
+	private class PairingParamsParser {
+		private Buffer buf;
+		private size_t cursor = 0;
+		private EnumClass param_type_class;
+
+		public static Variant parse (uint8[] data) throws Error {
+			var parser = new PairingParamsParser (new Bytes.static (data));
+			return parser.read_params ();
+		}
+
+		private PairingParamsParser (Bytes bytes) {
+			this.buf = new Buffer (bytes, 8, LITTLE_ENDIAN);
+			this.param_type_class = (EnumClass) typeof (PairingParamType).class_ref ();
+		}
+
+		private Variant read_params () throws Error {
+			var builder = new VariantBuilder (VariantType.VARDICT);
+
+			var byte_array = new VariantType.array (VariantType.BYTE);
+
+			size_t size = buf.bytes.get_size ();
+			while (cursor != size) {
+				var raw_type = read_raw_uint8 ();
+				unowned EnumValue? type_enum_val = param_type_class.get_value (raw_type);
+				if (type_enum_val == null)
+					throw new Error.INVALID_ARGUMENT ("Unsupported pairing parameter type (0x%x)", raw_type);
+				var type = (PairingParamType) raw_type;
+				unowned string key = type_enum_val.value_nick;
+
+				var val_size = read_raw_uint8 ();
+				Bytes val_bytes = read_raw_bytes (val_size);
+
+				Variant val;
+				switch (type) {
+					case STATE:
+						if (val_bytes.length != 1)
+							throw new Error.INVALID_ARGUMENT ("Invalid state value");
+						val = new Variant.byte (val_bytes[0]);
+						break;
+					default:
+						val = Variant.new_from_data (byte_array, val_bytes.get_data (), true, val_bytes);
+						break;
+				}
+
+				builder.add ("{sv}", key, val);
+			}
+
+			return builder.end ();
+		}
+
+		private uint8 read_raw_uint8 () throws Error {
+			check_available (sizeof (uint8));
+			var result = buf.read_uint8 (cursor);
+			cursor += sizeof (uint8);
+			return result;
+		}
+
+		private Bytes read_raw_bytes (size_t n) throws Error {
+			check_available (n);
+			Bytes result = buf.bytes[cursor:cursor + n];
+			cursor += n;
+			return result;
+		}
+
+		private void check_available (size_t required) throws Error {
+			size_t available = buf.bytes.get_size () - cursor;
+			if (available < required)
+				throw new Error.INVALID_ARGUMENT ("Invalid pairing parameters: truncated");
+		}
+	}
+
 	private enum PairingParamType {
 		PUBLIC_KEY = 3,
+		ENCRYPTED_DATA = 5,
 		STATE = 6,
 	}
 
@@ -1996,7 +2069,7 @@ namespace Frida.XPC {
 			var bytes = read_raw_bytes (size);
 			align (4);
 
-			return Variant.new_from_data (new VariantType ("ay"), bytes.get_data (), true, bytes);
+			return Variant.new_from_data (new VariantType.array (VariantType.BYTE), bytes.get_data (), true, bytes);
 		}
 
 		private Variant read_string () throws Error {
@@ -2180,6 +2253,10 @@ namespace Frida.XPC {
 
 		public uint64 get_uint64_value () throws Error {
 			return peek_scope ().get_value (VariantType.UINT64).get_uint64 ();
+		}
+
+		public Bytes get_data_value () throws Error {
+			return peek_scope ().get_value (new VariantType.array (VariantType.BYTE)).get_data_as_bytes ();
 		}
 
 		public unowned string get_string_value () throws Error {
