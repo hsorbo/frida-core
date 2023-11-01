@@ -242,12 +242,12 @@ namespace OpenSSL {
 	public class LibraryContext {
 	}
 
-	[CCode (cheader_filename = "openssl/core.h", cname = "OSSL_PARAM", destroy_function = "")]
+	[CCode (cheader_filename = "openssl/core.h", cname = "OSSL_PARAM", copy_function = "", destroy_function = "")]
 	public struct Param {
-		public string? key;
+		public unowned string? key;
 		public ParamDataType data_type;
 		[CCode (array_length_cname = "data_size")]
-		public uint8[]? data;
+		public unowned uint8[]? data;
 		public size_t return_size;
 	}
 
