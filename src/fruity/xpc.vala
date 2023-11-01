@@ -521,13 +521,13 @@ namespace Frida.XPC {
 			uint8[] raw_device_pubkey = start_response.read_member ("public-key").get_data_value ().get_data ();
 			var device_pubkey = new Key.from_raw_public_key (X25519, null, raw_device_pubkey);
 
-			Bytes encryption_key = derive_shared_key (host_keypair, device_pubkey);
+			Bytes shared_key = derive_shared_key (host_keypair, device_pubkey);
 
-			Bytes derived_key = derive_chacha_key (encryption_key,
+			Bytes operation_key = derive_chacha_key (shared_key,
 				"Pair-Verify-Encrypt-Info",
 				"Pair-Verify-Encrypt-Salt");
 
-			var cipher = new ChaCha20Poly1305 (derived_key, new Bytes.static ("\x00\x00\x00\x00PV-Msg03".data[:12]));
+			var cipher = new ChaCha20Poly1305 (operation_key, new Bytes.static ("\x00\x00\x00\x00PV-Msg03".data[:12]));
 
 			var message = new ByteArray.sized (100);
 			message.append (get_raw_public_key (host_keypair).get_data ());
