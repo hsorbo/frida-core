@@ -419,7 +419,6 @@ namespace Frida.XPC {
 			new Gee.HashMap<uint64?, Promise<ObjectReader>> (Numeric.uint64_hash, Numeric.uint64_equal);
 		private uint64 next_sequence_number = 0;
 
-		private Key? session_key;
 		private string host_identifier;
 		private Key? pair_record_key;
 
@@ -440,10 +439,6 @@ namespace Frida.XPC {
 		}
 
 		construct {
-			var ctx = new KeyContext.for_key_type (X25519);
-			ctx.keygen_init ();
-			ctx.keygen (ref session_key);
-
 			host_identifier = "<...>";
 			pair_record_key = new Key.from_raw_private_key (ED25519, null, {
 				<...>
@@ -504,9 +499,11 @@ namespace Frida.XPC {
 		}
 
 		public async bool verify_manual_pairing (Cancellable? cancellable = null) throws Error, IOError {
+			Key host_keypair = make_x25519_keypair ();
+
 			Bytes start_params = new PairingParamsBuilder ()
 				.add_state (1)
-				.add_public_key (session_key)
+				.add_public_key (host_keypair)
 				.build ();
 
 			Bytes start_payload = new ObjectBuilder ()
@@ -521,45 +518,28 @@ namespace Frida.XPC {
 				.build ();
 
 			var start_response = yield request_pairing_data (start_payload, cancellable);
-			uint8[] raw_peer_public_key = start_response
+			uint8[] raw_device_pubkey = start_response
 				.read_member ("public-key")
 				.get_data_value ().get_data ();
-			var peer_public_key = new Key.from_raw_public_key (X25519, null, raw_peer_public_key);
+			var device_pubkey = new Key.from_raw_public_key (X25519, null, raw_device_pubkey);
 
-			var ctx = new KeyContext.for_key (session_key);
-			ctx.derive_init ();
-			ctx.derive_set_peer (peer_public_key);
-			size_t encryption_key_size = 0;
-			ctx.derive (null, ref encryption_key_size);
-			var encryption_key = new uint8[encryption_key_size];
-			ctx.derive (encryption_key, ref encryption_key_size);
+			Bytes encryption_key = derive_shared_key (host_keypair, device_pubkey);
 
-			var kdf = KeyDerivationFunction.fetch (null, KeyDerivationAlgorithm.HKDF);
-			var kdf_ctx = new KeyDerivationContext (kdf);
-			unowned string info = "Pair-Verify-Encrypt-Info";
-			unowned string salt = "Pair-Verify-Encrypt-Salt";
-			size_t return_size = OpenSSL.ParamReturnSize.UNMODIFIED;
-			OpenSSL.Param kdf_params[] = {
-				{ KeyDerivationParameter.DIGEST, UTF8_STRING, OpenSSL.ShortName.sha512.data, return_size },
-				{ KeyDerivationParameter.KEY, OCTET_STRING, encryption_key, return_size },
-				{ KeyDerivationParameter.INFO, OCTET_STRING, info.data, return_size },
-				{ KeyDerivationParameter.SALT, OCTET_STRING, salt.data, return_size },
-				{ null, INTEGER, null, return_size },
-			};
-			uint8 derived_key[32];
-			kdf_ctx.derive (derived_key, kdf_params);
+			Bytes derived_key = derive_chacha_key (encryption_key.get_data (),
+				"Pair-Verify-Encrypt-Info",
+				"Pair-Verify-Encrypt-Salt");
 
 			var cipher_ctx = new CipherContext ();
 			var cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
 			unowned string iv = "\x00\x00\x00\x00PV-Msg03";
-			cipher_ctx.encrypt_init (cipher, derived_key, iv.data[:12]);
+			cipher_ctx.encrypt_init (cipher, derived_key.get_data (), iv.data[:12]);
 
 			var mdc = new MessageDigestContext ();
 			mdc.digest_sign_init (null, null, null, pair_record_key);
 			var blob = new ByteArray.sized (100);
-			blob.append (get_raw_public_key (session_key));
+			blob.append (get_raw_public_key (host_keypair));
 			blob.append (host_identifier.data);
-			blob.append (raw_peer_public_key);
+			blob.append (raw_device_pubkey);
 			size_t siglen = 0;
 			mdc.digest_sign (null, ref siglen, blob.data);
 			var signature = new uint8[siglen];
@@ -577,8 +557,6 @@ namespace Frida.XPC {
 			int extra_size = encrypted_inner_params.length - encrypted_inner_params_size;
 			cipher_ctx.encrypt_final (encrypted_inner_params[encrypted_inner_params_size:], ref extra_size);
 			assert (extra_size == 0);
-
-			var tag = new uint8[16];
 			cipher_ctx.ctrl (AEAD_GET_TAG, (int) tag_size, (void *) encrypted_inner_params[encrypted_inner_params_size:]);
 
 			Bytes outer_params = new PairingParamsBuilder ()
@@ -598,8 +576,24 @@ namespace Frida.XPC {
 				.build ();
 
 			ObjectReader finish_response = yield request_pairing_data (finish_payload, cancellable);
+			if (finish_response.has_member ("error")) {
+				yield post_plain (new ObjectBuilder ()
+					.begin_dictionary ()
+						.set_member_name ("event")
+						.begin_dictionary ()
+							.set_member_name ("_0")
+							.begin_dictionary ()
+								.set_member_name ("pairVerifyFailed")
+								.begin_dictionary ()
+								.end_dictionary ()
+							.end_dictionary ()
+						.end_dictionary ()
+					.end_dictionary ()
+					.build (), cancellable);
+				return false;
+			}
 
-			return !finish_response.has_member ("error");
+			return true;
 		}
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
@@ -642,7 +636,24 @@ namespace Frida.XPC {
 			var promise = new Promise<ObjectReader> ();
 			plain_requests[seqno] = promise;
 
-			Bytes request = new BodyBuilder ()
+			try {
+				yield post_plain_with_sequence_number (seqno, payload);
+			} catch (GLib.Error e) {
+				if (plain_requests.unset (seqno))
+					promise.reject (e);
+			}
+
+			return yield promise.future.wait_async (cancellable);
+		}
+
+		private async void post_plain (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
+			uint64 seqno = next_sequence_number++;
+			yield post_plain_with_sequence_number (seqno, payload, cancellable);
+		}
+
+		private async void post_plain_with_sequence_number (uint64 seqno, Bytes payload, Cancellable? cancellable = null)
+				throws Error, IOError {
+			yield connection.post (new BodyBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("mangledTypeName")
 					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
@@ -662,16 +673,7 @@ namespace Frida.XPC {
 						.end_dictionary ()
 					.end_dictionary ()
 				.end_dictionary ()
-				.build ();
-
-			try {
-				yield connection.post (request);
-			} catch (GLib.Error e) {
-				if (plain_requests.unset (seqno))
-					promise.reject (e);
-			}
-
-			return yield promise.future.wait_async (cancellable);
+				.build ());
 		}
 
 		private void on_close (Error? error) {
@@ -2432,6 +2434,57 @@ namespace Frida.XPC {
 		var pubkey = new uint8[size];
 		key.get_raw_public_key (pubkey, ref size);
 		return pubkey;
+	}
+
+	private Key make_x25519_keypair () {
+		var ctx = new KeyContext.for_key_type (X25519);
+		ctx.keygen_init ();
+
+		Key? keypair = null;
+		ctx.keygen (ref keypair);
+
+		return keypair;
+	}
+
+	private Bytes derive_shared_key (Key local_keypair, Key remote_pubkey) {
+		var ctx = new KeyContext.for_key (local_keypair);
+		ctx.derive_init ();
+		ctx.derive_set_peer (remote_pubkey);
+
+		size_t key_size = 0;
+		ctx.derive (null, ref key_size);
+
+		var shared_key = new uint8[key_size];
+		ctx.derive (shared_key, ref key_size);
+
+		return new Bytes.take ((owned) shared_key);
+	}
+
+	private Bytes derive_chacha_key (uint8[] shared_key, string info, string? salt = null) {
+		var kdf = KeyDerivationFunction.fetch (null, KeyDerivationAlgorithm.HKDF);
+
+		var kdf_ctx = new KeyDerivationContext (kdf);
+
+		size_t return_size = OpenSSL.ParamReturnSize.UNMODIFIED;
+
+		var kdf_params = new OpenSSL.Param[] {
+			{ KeyDerivationParameter.DIGEST, UTF8_STRING, OpenSSL.ShortName.sha512.data, return_size },
+			{ KeyDerivationParameter.KEY, OCTET_STRING, shared_key, return_size },
+			{ KeyDerivationParameter.INFO, OCTET_STRING, info.data, return_size },
+		};
+
+		if (salt != null) {
+			OpenSSL.Param p = { KeyDerivationParameter.SALT, OCTET_STRING, salt.data, return_size };
+			kdf_params += p;
+		}
+
+		OpenSSL.Param terminator = { null, INTEGER, null, return_size };
+		kdf_params += terminator;
+
+		var derived_key = new uint8[32];
+		kdf_ctx.derive (derived_key, kdf_params);
+
+		return new Bytes.take ((owned) derived_key);
 	}
 
 	// https://gist.github.com/phako/96b36b5070beaf7eee27
