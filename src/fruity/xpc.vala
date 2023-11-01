@@ -1,5 +1,5 @@
-[CCode (gir_namespace = "FridaXPC", gir_version = "1.0")]
-namespace Frida.XPC {
+[CCode (gir_namespace = "FridaFruity", gir_version = "1.0")]
+namespace Frida.Fruity.XPC {
 	using Darwin.DNSSD;
 	using Darwin.GCD;
 	using Darwin.Net;
@@ -413,6 +413,11 @@ namespace Frida.XPC {
 			construct;
 		}
 
+		public DeviceInfo device_info {
+			get;
+			private set;
+		}
+
 		private Connection connection;
 
 		private Gee.Map<uint64?, Promise<ObjectReader>> plain_requests =
@@ -453,6 +458,11 @@ namespace Frida.XPC {
 
 			yield connection.wait_until_ready (cancellable);
 
+			yield attempt_pair_verify (cancellable);
+			bool paired = yield verify_manual_pairing (cancellable);
+			if (!paired)
+				throw new Error.NOT_SUPPORTED ("Pairing not yet supported");
+
 			return true;
 		}
 
@@ -460,7 +470,7 @@ namespace Frida.XPC {
 			connection.cancel ();
 		}
 
-		public async ObjectReader attempt_pair_verify (Cancellable? cancellable = null) throws Error, IOError {
+		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
 			Bytes payload = new ObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("request")
@@ -491,14 +501,40 @@ namespace Frida.XPC {
 				.read_member ("response")
 				.read_member ("_1")
 				.read_member ("handshake")
-				.read_member ("_0");
+				.read_member ("_0")
+				.read_member ("peerDeviceInfo");
+
+			string name = response.read_member ("name").get_string_value ();
+			response.end_member ();
+
+			string model = response.read_member ("model").get_string_value ();
+			response.end_member ();
+
+			string udid = response.read_member ("udid").get_string_value ();
+			response.end_member ();
+
+			uint64 ecid = response.read_member ("ecid").get_uint64_value ();
+			response.end_member ();
+
+			Plist kvs;
+			try {
+				kvs = new Plist.from_binary (response.read_member ("deviceKVSData").get_data_value ().get_data ());
+				response.end_member ();
+			} catch (PlistError e) {
+				throw new Error.PROTOCOL ("%s", e.message);
+			}
 
 			printerr ("attempt_pair_verify() got: %s\n", variant_to_pretty_string (response.current_object));
-
-			return response;
+			device_info = new DeviceInfo () {
+				name = name,
+				model = model,
+				udid = udid,
+				ecid = ecid,
+				kvs = kvs,
+			};
 		}
 
-		public async bool verify_manual_pairing (Cancellable? cancellable = null) throws Error, IOError {
+		private async bool verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
 			Key host_keypair = make_x25519_keypair ();
 
 			Bytes start_params = new PairingParamsBuilder ()
@@ -672,30 +708,22 @@ namespace Frida.XPC {
 
 			var reader = new ObjectReader (msg.body);
 			try {
-				string type_name = reader
-					.read_member ("mangledTypeName")
-					.get_string_value ();
+				string type_name = reader.read_member ("mangledTypeName").get_string_value ();
 				if (type_name != "RemotePairingDevice.ControlChannelMessageEnvelope")
 					return;
 				reader.end_member ();
 
 				reader.read_member ("value");
 
-				string origin = reader
-					.read_member ("originatedBy")
-					.get_string_value ();
+				string origin = reader.read_member ("originatedBy").get_string_value ();
 				if (origin != "device")
 					return;
 				reader.end_member ();
 
-				uint64 seqno = reader
-					.read_member ("sequenceNumber")
-					.get_uint64_value ();
+				uint64 seqno = reader.read_member ("sequenceNumber").get_uint64_value ();
 				reader.end_member ();
 
-				reader.read_member ("message")
-					.read_member ("plain")
-					.read_member ("_0");
+				reader.read_member ("message").read_member ("plain").read_member ("_0");
 
 				Promise<ObjectReader> promise;
 				if (!plain_requests.unset (seqno, out promise))
@@ -704,6 +732,18 @@ namespace Frida.XPC {
 				promise.resolve (reader);
 			} catch (Error e) {
 			}
+		}
+	}
+
+	public class DeviceInfo {
+		public string name;
+		public string model;
+		public string udid;
+		public uint64 ecid;
+		public Plist kvs;
+
+		public string to_string () {
+			return @"DeviceInfo { name: \"$name\", model: \"$model\", udid: \"$udid\" }";
 		}
 	}
 
