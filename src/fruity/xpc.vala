@@ -420,12 +420,15 @@ namespace Frida.Fruity.XPC {
 
 		private Connection connection;
 
-		private Gee.Map<uint64?, Promise<ObjectReader>> plain_requests =
+		private Gee.Map<uint64?, Promise<ObjectReader>> requests =
 			new Gee.HashMap<uint64?, Promise<ObjectReader>> (Numeric.uint64_hash, Numeric.uint64_equal);
-		private uint64 next_sequence_number = 0;
+		private uint64 next_control_sequence_number = 0;
+		private uint64 next_encrypted_sequence_number = 0;
 
 		private string host_identifier;
 		private Key? pair_record_key;
+		private ChaCha20Poly1305? client_cipher;
+		private ChaCha20Poly1305? server_cipher;
 
 		public static async TunnelService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
 			var service = new TunnelService (stream);
@@ -459,15 +462,26 @@ namespace Frida.Fruity.XPC {
 			yield connection.wait_until_ready (cancellable);
 
 			yield attempt_pair_verify (cancellable);
-			bool paired = yield verify_manual_pairing (cancellable);
-			if (!paired)
+
+			Bytes? shared_key = yield verify_manual_pairing (cancellable);
+			if (shared_key == null)
 				throw new Error.NOT_SUPPORTED ("Pairing not yet supported");
+
+			client_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ClientEncrypt-main"));
+			server_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ServerEncrypt-main"));
 
 			return true;
 		}
 
 		public void close () {
 			connection.cancel ();
+		}
+
+		public async void create_listener (Cancellable? cancellable = null) throws Error, IOError {
+			unowned string request = """{"request": {"_0": {"createListener": {"key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvxGoUUKGs9iwCciGSLXugDmRsW7vGowuIIc6LgTmCAPX4HNhRmvmB2j7Thb8vc0kFNTr/qbfj1LB/kgjAe6LLHaJtlUZB7x50bldnAwcYHXaugzyilTyolE81d1pnjBv+WbpvErTR5pbn8quTfeN3sStLqr/BJZ2Uqxy/NLTxjINHoO3UEsxQSQ1b2dRzQ2dofIooNGT42Ljdj/SPc9HOpVdv7FzqtMnHAjCuhjOopFFtH8FUXRMYpk1YeaYxVn9r7FIj2f/LDSL7aAHbgoKMd6dUM8ZZRT+vuzAl6XRNZG77h1CgxwjxsrZ1XGdikBneB8dxiDjfO/l07b20G4eiwIDAQAB", "transportProtocolType": "quic"}}}}""";
+			printerr ("Performing request: %s\n", request);
+			string response = yield request_encrypted (request, cancellable);
+			printerr ("Got response: %s\n", response);
 		}
 
 		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
@@ -524,7 +538,6 @@ namespace Frida.Fruity.XPC {
 				throw new Error.PROTOCOL ("%s", e.message);
 			}
 
-			printerr ("attempt_pair_verify() got: %s\n", variant_to_pretty_string (response.current_object));
 			device_info = new DeviceInfo () {
 				name = name,
 				model = model,
@@ -534,7 +547,7 @@ namespace Frida.Fruity.XPC {
 			};
 		}
 
-		private async bool verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
+		private async Bytes? verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
 			Key host_keypair = make_x25519_keypair ();
 
 			Bytes start_params = new PairingParamsBuilder ()
@@ -563,7 +576,7 @@ namespace Frida.Fruity.XPC {
 				"Pair-Verify-Encrypt-Info",
 				"Pair-Verify-Encrypt-Salt");
 
-			var cipher = new ChaCha20Poly1305 (operation_key, new Bytes.static ("\x00\x00\x00\x00PV-Msg03".data[:12]));
+			var cipher = new ChaCha20Poly1305 (operation_key);
 
 			var message = new ByteArray.sized (100);
 			message.append (get_raw_public_key (host_keypair).get_data ());
@@ -578,7 +591,10 @@ namespace Frida.Fruity.XPC {
 
 			Bytes outer_params = new PairingParamsBuilder ()
 				.add_state (3)
-				.add_encrypted_data (cipher.encrypt_message (inner_params))
+				.add_encrypted_data (
+					cipher.encrypt (
+						new Bytes.static ("\x00\x00\x00\x00PV-Msg03".data[:12]),
+						inner_params))
 				.build ();
 
 			Bytes finish_payload = new ObjectBuilder ()
@@ -607,13 +623,13 @@ namespace Frida.Fruity.XPC {
 						.end_dictionary ()
 					.end_dictionary ()
 					.build (), cancellable);
-				return false;
+				return null;
 			}
 
-			return true;
+			return shared_key;
 		}
 
-		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
+		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable) throws Error, IOError {
 			Bytes wrapper = new ObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("event")
@@ -648,27 +664,31 @@ namespace Frida.Fruity.XPC {
 			return new ObjectReader (data);
 		}
 
-		private async ObjectReader request_plain (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
-			uint64 seqno = next_sequence_number++;
+		private async ObjectReader request_plain (Bytes payload, Cancellable? cancellable) throws Error, IOError {
+			uint64 seqno = next_control_sequence_number++;
 			var promise = new Promise<ObjectReader> ();
-			plain_requests[seqno] = promise;
+			requests[seqno] = promise;
 
 			try {
-				yield post_plain_with_sequence_number (seqno, payload);
+				yield post_plain_with_sequence_number (seqno, payload, cancellable);
 			} catch (GLib.Error e) {
-				if (plain_requests.unset (seqno))
+				if (requests.unset (seqno))
 					promise.reject (e);
 			}
 
-			return yield promise.future.wait_async (cancellable);
+			ObjectReader response = yield promise.future.wait_async (cancellable);
+
+			return response
+				.read_member ("plain")
+				.read_member ("_0");
 		}
 
-		private async void post_plain (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
-			uint64 seqno = next_sequence_number++;
+		private async void post_plain (Bytes payload, Cancellable? cancellable) throws Error, IOError {
+			uint64 seqno = next_control_sequence_number++;
 			yield post_plain_with_sequence_number (seqno, payload, cancellable);
 		}
 
-		private async void post_plain_with_sequence_number (uint64 seqno, Bytes payload, Cancellable? cancellable = null)
+		private async void post_plain_with_sequence_number (uint64 seqno, Bytes payload, Cancellable? cancellable)
 				throws Error, IOError {
 			yield connection.post (new BodyBuilder ()
 				.begin_dictionary ()
@@ -693,13 +713,68 @@ namespace Frida.Fruity.XPC {
 				.build ());
 		}
 
+		private async string request_encrypted (string payload, Cancellable? cancellable) throws Error, IOError {
+			uint64 seqno = next_control_sequence_number++;
+			var promise = new Promise<ObjectReader> ();
+			requests[seqno] = promise;
+
+			Bytes iv = make_buffer_builder ()
+				.append_uint64 (next_encrypted_sequence_number++)
+				.append_uint32 (0)
+				.build ();
+
+			Bytes raw_request = new BodyBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("mangledTypeName")
+					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
+					.set_member_name ("value")
+					.begin_dictionary ()
+						.set_member_name ("sequenceNumber")
+						.add_uint64_value (seqno)
+						.set_member_name ("originatedBy")
+						.add_string_value ("host")
+						.set_member_name ("message")
+						.begin_dictionary ()
+							.set_member_name ("streamEncrypted")
+							.begin_dictionary ()
+								.set_member_name ("_0")
+								.add_data_value (client_cipher.encrypt (iv, new Bytes.static (payload.data)))
+							.end_dictionary ()
+						.end_dictionary ()
+					.end_dictionary ()
+				.end_dictionary ()
+				.build ();
+
+			try {
+				yield connection.post (raw_request, cancellable);
+			} catch (GLib.Error e) {
+				if (requests.unset (seqno))
+					promise.reject (e);
+			}
+
+			ObjectReader response = yield promise.future.wait_async (cancellable);
+
+			Bytes encrypted_response = response
+				.read_member ("streamEncrypted")
+				.read_member ("_0")
+				.get_data_value ();
+
+			Bytes decrypted_response = server_cipher.decrypt (iv, encrypted_response);
+
+			unowned string s = (string) decrypted_response.get_data ();
+			if (!s.validate ((ssize_t) decrypted_response.get_size ()))
+				throw new Error.PROTOCOL ("Invalid UTF-8");
+
+			return s;
+		}
+
 		private void on_close (Error? error) {
 			var e = (error != null)
 				? error
 				: new Error.TRANSPORT ("Connection closed while waiting for response");
-			foreach (Promise<ObjectReader> promise in plain_requests.values)
+			foreach (Promise<ObjectReader> promise in requests.values)
 				promise.reject (e);
-			plain_requests.clear ();
+			requests.clear ();
 		}
 
 		private void on_message (Message msg) {
@@ -723,10 +798,10 @@ namespace Frida.Fruity.XPC {
 				uint64 seqno = reader.read_member ("sequenceNumber").get_uint64_value ();
 				reader.end_member ();
 
-				reader.read_member ("message").read_member ("plain").read_member ("_0");
+				reader.read_member ("message");
 
 				Promise<ObjectReader> promise;
-				if (!plain_requests.unset (seqno, out promise))
+				if (!requests.unset (seqno, out promise))
 					return;
 
 				promise.resolve (reader);
@@ -748,7 +823,7 @@ namespace Frida.Fruity.XPC {
 	}
 
 	private class PairingParamsBuilder {
-		private BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
+		private BufferBuilder builder = make_buffer_builder ();
 
 		public unowned PairingParamsBuilder add_identifier (string identifier) {
 			begin_param (IDENTIFIER, identifier.data.length)
@@ -809,7 +884,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private PairingParamsParser (Bytes bytes) {
-			this.buf = new Buffer (bytes, 8, LITTLE_ENDIAN);
+			this.buf = make_buffer (bytes);
 			this.param_type_class = (EnumClass) typeof (PairingParamType).class_ref ();
 		}
 
@@ -1307,7 +1382,7 @@ namespace Frida.Fruity.XPC {
 				.add_body (body)
 				.build ();
 
-			printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
+			// printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
 
 			bool waiting = false;
 
@@ -1395,7 +1470,7 @@ namespace Frida.Fruity.XPC {
 				.add_body (body)
 				.build ();
 
-			printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
+			// printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
 
 			yield root_stream.submit_data (raw_request, cancellable);
 		}
@@ -1723,7 +1798,7 @@ namespace Frida.Fruity.XPC {
 					return 0;
 				incoming_message.remove_range (0, (uint) size);
 
-				printerr ("\n<<< [stream_id=%d] %s\n", id, msg.to_string ());
+				// printerr ("\n<<< [stream_id=%d] %s\n", id, msg.to_string ());
 
 				switch (msg.type) {
 					case HEADER:
@@ -1774,7 +1849,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public Bytes build () {
-			var builder = new BufferBuilder (8, LITTLE_ENDIAN)
+			var builder = make_buffer_builder ()
 				.append_uint32 (Message.MAGIC)
 				.append_uint8 (Message.PROTOCOL_VERSION)
 				.append_uint8 (message_type)
@@ -1814,7 +1889,7 @@ namespace Frida.Fruity.XPC {
 				return null;
 			}
 
-			var buf = new Buffer (new Bytes.static (data), 8, LITTLE_ENDIAN);
+			var buf = make_buffer (new Bytes.static (data));
 
 			var magic = buf.read_uint32 (0);
 			if (magic != MAGIC)
@@ -1941,7 +2016,7 @@ namespace Frida.Fruity.XPC {
 	}
 
 	public class ObjectBuilder {
-		protected BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
+		protected BufferBuilder builder = make_buffer_builder ();
 		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
 
 		public ObjectBuilder () {
@@ -2146,7 +2221,7 @@ namespace Frida.Fruity.XPC {
 			if (data.length < 12)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: truncated");
 
-			var buf = new Buffer (new Bytes.static (data), 8, LITTLE_ENDIAN);
+			var buf = make_buffer (new Bytes.static (data));
 
 			var magic = buf.read_uint32 (0);
 			if (magic != SerializedObject.MAGIC)
@@ -2449,6 +2524,14 @@ namespace Frida.Fruity.XPC {
 		public const uint32 VERSION = 5;
 	}
 
+	private BufferBuilder make_buffer_builder () {
+		return new BufferBuilder (8, LITTLE_ENDIAN);
+	}
+
+	private Buffer make_buffer (Bytes bytes) {
+		return new Buffer (bytes, 8, LITTLE_ENDIAN);
+	}
+
 	private Bytes get_raw_public_key (Key key) {
 		size_t size = 0;
 		key.get_raw_public_key (null, ref size);
@@ -2522,22 +2605,22 @@ namespace Frida.Fruity.XPC {
 
 	private class ChaCha20Poly1305 {
 		private Bytes key;
-		private Bytes iv;
 
 		private Cipher cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
 		private CipherContext? cached_ctx;
 
-		public ChaCha20Poly1305 (Bytes key, Bytes iv) {
+		private const size_t TAG_SIZE = 16;
+
+		public ChaCha20Poly1305 (Bytes key) {
 			this.key = key;
-			this.iv = iv;
 		}
 
-		public Bytes encrypt_message (Bytes message) {
+		public Bytes encrypt (Bytes iv, Bytes message) {
 			size_t cleartext_size = message.get_size ();
-			size_t tag_size = 16;
-			var buf = new uint8[cleartext_size + tag_size];
+			var buf = new uint8[cleartext_size + TAG_SIZE];
 
 			unowned CipherContext ctx = get_context ();
+			cached_ctx.encrypt_init (cipher, key.get_data (), iv.get_data ());
 
 			int size = buf.length;
 			ctx.encrypt_update (buf, ref size, message.get_data ());
@@ -2546,7 +2629,36 @@ namespace Frida.Fruity.XPC {
 			ctx.encrypt_final (buf[size:], ref extra_size);
 			assert (extra_size == 0);
 
-			ctx.ctrl (AEAD_GET_TAG, (int) tag_size, (void *) buf[size:]);
+			ctx.ctrl (AEAD_GET_TAG, (int) TAG_SIZE, (void *) buf[size:]);
+
+			return new Bytes.take ((owned) buf);
+		}
+
+		public Bytes decrypt (Bytes iv, Bytes message) throws Error {
+			size_t message_size = message.get_size ();
+			if (message_size < 1 + TAG_SIZE)
+				throw new Error.PROTOCOL ("Encrypted message is too short");
+			unowned uint8[] message_data = message.get_data ();
+
+			var buf = new uint8[message_size];
+
+			unowned CipherContext ctx = get_context ();
+			cached_ctx.decrypt_init (cipher, key.get_data (), iv.get_data ());
+
+			int size = (int) message_size;
+			int res = ctx.decrypt_update (buf, ref size, message_data);
+			if (res != 1)
+				throw new Error.PROTOCOL ("Failed to decrypt: %d", res);
+
+			int extra_size = buf.length - size;
+			res = ctx.decrypt_final (buf[size:], ref extra_size);
+			if (res != 1)
+				throw new Error.PROTOCOL ("Failed to decrypt: %d", res);
+			assert (extra_size == 0);
+
+			size_t cleartext_size = message_size - TAG_SIZE;
+			buf[cleartext_size] = 0;
+			buf.length = (int) cleartext_size;
 
 			return new Bytes.take ((owned) buf);
 		}
@@ -2556,9 +2668,6 @@ namespace Frida.Fruity.XPC {
 				cached_ctx = new CipherContext ();
 			else
 				cached_ctx.reset ();
-
-			cached_ctx.encrypt_init (cipher, key.get_data (), iv.get_data ());
-
 			return cached_ctx;
 		}
 	}

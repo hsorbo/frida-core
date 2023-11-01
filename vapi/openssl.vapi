@@ -155,6 +155,15 @@ namespace OpenSSL {
 			public int encrypt_update ([CCode (array_length = false)] uint8[] output, ref int outlen, uint8[] input);
 			[CCode (cname = "EVP_EncryptFinal")]
 			public int encrypt_final ([CCode (array_length = false)] uint8[] output, ref int outlen);
+
+			[CCode (cname = "EVP_DecryptInit")]
+			public int decrypt_init (Cipher cipher,
+				[CCode (array_length = false)] uint8[] key,
+				[CCode (array_length = false)] uint8[] iv);
+			[CCode (cname = "EVP_DecryptUpdate")]
+			public int decrypt_update ([CCode (array_length = false)] uint8[] output, ref int outlen, uint8[] input);
+			[CCode (cname = "EVP_DecryptFinal")]
+			public int decrypt_final ([CCode (array_length = false)] uint8[] output, ref int outlen);
 		}
 
 		[Compact]
