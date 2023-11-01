@@ -419,7 +419,7 @@ namespace Frida.XPC {
 			new Gee.HashMap<uint64?, Promise<ObjectReader>> (Numeric.uint64_hash, Numeric.uint64_equal);
 		private uint64 next_sequence_number = 0;
 
-		private Key? x25519_key;
+		private Key? session_key;
 		private string host_identifier;
 		private Key? pair_record_key;
 
@@ -442,7 +442,7 @@ namespace Frida.XPC {
 		construct {
 			var ctx = new KeyContext.for_key_type (X25519);
 			ctx.keygen_init ();
-			ctx.keygen (ref x25519_key);
+			ctx.keygen (ref session_key);
 
 			host_identifier = "<...>";
 			pair_record_key = new Key.from_raw_private_key (ED25519, null, {
@@ -503,10 +503,10 @@ namespace Frida.XPC {
 			return response;
 		}
 
-		public async ObjectReader verify_manual_pairing (Cancellable? cancellable = null) throws Error, IOError {
+		public async bool verify_manual_pairing (Cancellable? cancellable = null) throws Error, IOError {
 			Bytes start_params = new PairingParamsBuilder ()
 				.add_state (1)
-				.add_public_key (x25519_key)
+				.add_public_key (session_key)
 				.build ();
 
 			Bytes start_payload = new ObjectBuilder ()
@@ -521,13 +521,12 @@ namespace Frida.XPC {
 				.build ();
 
 			var start_response = yield request_pairing_data (start_payload, cancellable);
-			printerr ("Start response: %s\n", variant_to_pretty_string (start_response.current_object));
 			uint8[] raw_peer_public_key = start_response
 				.read_member ("public-key")
 				.get_data_value ().get_data ();
 			var peer_public_key = new Key.from_raw_public_key (X25519, null, raw_peer_public_key);
 
-			var ctx = new KeyContext.for_key (x25519_key);
+			var ctx = new KeyContext.for_key (session_key);
 			ctx.derive_init ();
 			ctx.derive_set_peer (peer_public_key);
 			size_t encryption_key_size = 0;
@@ -558,7 +557,7 @@ namespace Frida.XPC {
 			var mdc = new MessageDigestContext ();
 			mdc.digest_sign_init (null, null, null, pair_record_key);
 			var blob = new ByteArray.sized (100);
-			blob.append (get_raw_public_key (x25519_key));
+			blob.append (get_raw_public_key (session_key));
 			blob.append (host_identifier.data);
 			blob.append (raw_peer_public_key);
 			size_t siglen = 0;
@@ -570,9 +569,17 @@ namespace Frida.XPC {
 				.add_identifier (host_identifier)
 				.add_signature (signature)
 				.build ();
-			var encrypted_inner_params = new uint8[inner_params.get_size ()];
-			int encrypted_inner_params_size = encrypted_inner_params.length;
+			size_t cleartext_size = inner_params.get_size ();
+			size_t tag_size = 16;
+			var encrypted_inner_params = new uint8[cleartext_size + tag_size];
+			int encrypted_inner_params_size = (int) cleartext_size;
 			cipher_ctx.encrypt_update (encrypted_inner_params, ref encrypted_inner_params_size, inner_params.get_data ());
+			int extra_size = encrypted_inner_params.length - encrypted_inner_params_size;
+			cipher_ctx.encrypt_final (encrypted_inner_params[encrypted_inner_params_size:], ref extra_size);
+			assert (extra_size == 0);
+
+			var tag = new uint8[16];
+			cipher_ctx.ctrl (AEAD_GET_TAG, (int) tag_size, (void *) encrypted_inner_params[encrypted_inner_params_size:]);
 
 			Bytes outer_params = new PairingParamsBuilder ()
 				.add_state (3)
@@ -590,10 +597,9 @@ namespace Frida.XPC {
 				.end_dictionary ()
 				.build ();
 
-			var finish_response = yield request_pairing_data (finish_payload, cancellable);
-			printerr ("Finish response: %s\n", variant_to_pretty_string (finish_response.current_object));
+			ObjectReader finish_response = yield request_pairing_data (finish_payload, cancellable);
 
-			return finish_response;
+			return !finish_response.has_member ("error");
 		}
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
