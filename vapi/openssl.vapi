@@ -145,6 +145,8 @@ namespace OpenSSL {
 
 			public int reset ();
 
+			public int ctrl (CipherCtrlType type, int arg, void * ptr);
+
 			[CCode (cname = "EVP_EncryptInit")]
 			public int encrypt_init (Cipher cipher,
 				[CCode (array_length = false)] uint8[] key,
@@ -159,6 +161,54 @@ namespace OpenSSL {
 		[CCode (cname = "EVP_CIPHER", cprefix = "EVP_CIPHER_")]
 		public class Cipher {
 			public static Cipher? fetch (LibraryContext? ctx, string algorithm, string? properties = null);
+		}
+
+		[CCode (cheader_filename = "openssl/evp.h", cname = "int", cprefix = "EVP_CTRL_", has_type_id = false)]
+		public enum CipherCtrlType {
+			INIT,
+			SET_KEY_LENGTH,
+			GET_RC2_KEY_BITS,
+			SET_RC2_KEY_BITS,
+			GET_RC5_ROUNDS,
+			SET_RC5_ROUNDS,
+			RAND_KEY,
+			PBE_PRF_NID,
+			COPY,
+			AEAD_SET_IVLEN,
+			AEAD_GET_TAG,
+			AEAD_SET_TAG,
+			AEAD_SET_IV_FIXED,
+			GCM_SET_IVLEN,
+			GCM_GET_TAG,
+			GCM_SET_TAG,
+			GCM_SET_IV_FIXED,
+			GCM_IV_GEN,
+			CCM_SET_IVLEN,
+			CCM_GET_TAG,
+			CCM_SET_TAG,
+			CCM_SET_IV_FIXED,
+			CCM_SET_L,
+			CCM_SET_MSGLEN,
+			AEAD_TLS1_AAD,
+			AEAD_SET_MAC_KEY,
+			GCM_SET_IV_INV,
+			TLS1_1_MULTIBLOCK_AAD,
+			TLS1_1_MULTIBLOCK_ENCRYPT,
+			TLS1_1_MULTIBLOCK_DECRYPT,
+			TLS1_1_MULTIBLOCK_MAX_BUFSIZE,
+			SSL3_MASTER_SECRET,
+			SET_SBOX,
+			SBOX_USED,
+			KEY_MESH,
+			BLOCK_PADDING_MODE,
+			SET_PIPELINE_OUTPUT_BUFS,
+			SET_PIPELINE_INPUT_BUFS,
+			SET_PIPELINE_INPUT_LENS,
+			GET_IVLEN,
+			SET_SPEED,
+			PROCESS_UNPROTECTED,
+			GET_WRAP_CIPHER,
+			TLSTREE,
 		}
 
 		[Compact]

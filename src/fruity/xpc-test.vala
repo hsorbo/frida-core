@@ -42,7 +42,8 @@ namespace Frida.XPC {
 			printerr ("Opened TunnelService!\n");
 
 			yield tunnel.attempt_pair_verify (cancellable);
-			yield tunnel.verify_manual_pairing (cancellable);
+			bool verified = yield tunnel.verify_manual_pairing (cancellable);
+			printerr ("verify_manual_pairing() => %s\n", verified.to_string ());
 
 			yield;
 		} catch (Error e) {
