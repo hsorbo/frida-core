@@ -1,4 +1,4 @@
-namespace Frida.XPC {
+namespace Frida.Fruity.XPC {
 	private const string TUNNEL_HOST = "[fddf:a718:85ed::1]";
 	private const uint16 RSD_PORT = 63025;
 
@@ -40,10 +40,9 @@ namespace Frida.XPC {
 				yield device.open_service ("com.apple.internal.dt.coredevice.untrusted.tunnelservice", cancellable),
 				cancellable);
 			printerr ("Opened TunnelService!\n");
-
-			yield tunnel.attempt_pair_verify (cancellable);
-			bool verified = yield tunnel.verify_manual_pairing (cancellable);
-			printerr ("verify_manual_pairing() => %s\n", verified.to_string ());
+			DeviceInfo di = tunnel.device_info;
+			printerr ("%s\n", di.to_string ());
+			printerr ("%s\n", di.kvs.to_xml ());
 
 			yield;
 		} catch (Error e) {
