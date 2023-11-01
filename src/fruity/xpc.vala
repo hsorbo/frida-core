@@ -420,6 +420,8 @@ namespace Frida.XPC {
 		private uint64 next_sequence_number = 0;
 
 		private Key? x25519_key;
+		private string host_identifier;
+		private Key? pair_record_key;
 
 		public static async TunnelService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
 			var service = new TunnelService (stream);
@@ -441,6 +443,11 @@ namespace Frida.XPC {
 			var ctx = new KeyContext.for_key_type (X25519);
 			ctx.keygen_init ();
 			ctx.keygen (ref x25519_key);
+
+			host_identifier = "<...>";
+			pair_record_key = new Key.from_raw_private_key (ED25519, null, {
+				<...>
+			});
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -459,7 +466,7 @@ namespace Frida.XPC {
 		}
 
 		public async ObjectReader attempt_pair_verify (Cancellable? cancellable = null) throws Error, IOError {
-			var payload = new ObjectBuilder ()
+			Bytes payload = new ObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("request")
 					.begin_dictionary ()
@@ -497,12 +504,12 @@ namespace Frida.XPC {
 		}
 
 		public async ObjectReader verify_manual_pairing (Cancellable? cancellable = null) throws Error, IOError {
-			var start_params = new PairingParamsBuilder ()
+			Bytes start_params = new PairingParamsBuilder ()
 				.add_state (1)
 				.add_public_key (x25519_key)
 				.build ();
 
-			var payload = new ObjectBuilder ()
+			Bytes start_payload = new ObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("kind")
 					.add_string_value ("verifyManualPairing")
@@ -513,12 +520,12 @@ namespace Frida.XPC {
 				.end_dictionary ()
 				.build ();
 
-			var response = yield request_pairing_data (payload, cancellable);
-			printerr ("Got pairing params: %s\n", variant_to_pretty_string (response.current_object));
-			var peer_public_key = new Key.from_raw_public_key (X25519, null,
-				response
-					.read_member ("public-key")
-					.get_data_value ().get_data ());
+			var start_response = yield request_pairing_data (start_payload, cancellable);
+			printerr ("Start response: %s\n", variant_to_pretty_string (start_response.current_object));
+			uint8[] raw_peer_public_key = start_response
+				.read_member ("public-key")
+				.get_data_value ().get_data ();
+			var peer_public_key = new Key.from_raw_public_key (X25519, null, raw_peer_public_key);
 
 			var ctx = new KeyContext.for_key (x25519_key);
 			ctx.derive_init ();
@@ -527,9 +534,6 @@ namespace Frida.XPC {
 			ctx.derive (null, ref encryption_key_size);
 			var encryption_key = new uint8[encryption_key_size];
 			ctx.derive (encryption_key, ref encryption_key_size);
-
-			printerr ("Encryption key:\n");
-			hexdump (encryption_key);
 
 			var kdf = KeyDerivationFunction.fetch (null, KeyDerivationAlgorithm.HKDF);
 			var kdf_ctx = new KeyDerivationContext (kdf);
@@ -544,25 +548,56 @@ namespace Frida.XPC {
 				{ null, INTEGER, null, return_size },
 			};
 			uint8 derived_key[32];
-			int res = kdf_ctx.derive (derived_key, kdf_params);
-			printerr ("derive() => %d\n", res);
-			hexdump (derived_key);
+			kdf_ctx.derive (derived_key, kdf_params);
 
-			var cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
-			printerr ("got cipher: %p\n", cipher);
 			var cipher_ctx = new CipherContext ();
+			var cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
 			unowned string iv = "\x00\x00\x00\x00PV-Msg03";
-			printerr ("iv.data.length=%d\n", iv.data.length);
-			hexdump (iv.data[:12]);
-			res = cipher_ctx.encrypt_init (cipher, derived_key, iv.data[:12]);
-			printerr ("encrypt_init() => res=%d\n", res);
+			cipher_ctx.encrypt_init (cipher, derived_key, iv.data[:12]);
 
-			return response;
+			var mdc = new MessageDigestContext ();
+			mdc.digest_sign_init (null, null, null, pair_record_key);
+			var blob = new ByteArray.sized (100);
+			blob.append (get_raw_public_key (x25519_key));
+			blob.append (host_identifier.data);
+			blob.append (raw_peer_public_key);
+			size_t siglen = 0;
+			mdc.digest_sign (null, ref siglen, blob.data);
+			var signature = new uint8[siglen];
+			mdc.digest_sign (signature, ref siglen, blob.data);
+
+			Bytes inner_params = new PairingParamsBuilder ()
+				.add_identifier (host_identifier)
+				.add_signature (signature)
+				.build ();
+			var encrypted_inner_params = new uint8[inner_params.get_size ()];
+			int encrypted_inner_params_size = encrypted_inner_params.length;
+			cipher_ctx.encrypt_update (encrypted_inner_params, ref encrypted_inner_params_size, inner_params.get_data ());
+
+			Bytes outer_params = new PairingParamsBuilder ()
+				.add_state (3)
+				.add_encrypted_data (encrypted_inner_params)
+				.build ();
+
+			Bytes finish_payload = new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("kind")
+					.add_string_value ("verifyManualPairing")
+					.set_member_name ("startNewSession")
+					.add_bool_value (false)
+					.set_member_name ("data")
+					.add_data_value (outer_params)
+				.end_dictionary ()
+				.build ();
+
+			var finish_response = yield request_pairing_data (finish_payload, cancellable);
+			printerr ("Finish response: %s\n", variant_to_pretty_string (finish_response.current_object));
+
+			return finish_response;
 		}
 
-
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable = null) throws Error, IOError {
-			var wrapper = new ObjectBuilder ()
+			Bytes wrapper = new ObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("event")
 					.begin_dictionary ()
@@ -601,7 +636,7 @@ namespace Frida.XPC {
 			var promise = new Promise<ObjectReader> ();
 			plain_requests[seqno] = promise;
 
-			var request = new BodyBuilder ()
+			Bytes request = new BodyBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("mangledTypeName")
 					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
@@ -686,20 +721,39 @@ namespace Frida.XPC {
 	private class PairingParamsBuilder {
 		private BufferBuilder builder = new BufferBuilder (8, LITTLE_ENDIAN);
 
-		public unowned PairingParamsBuilder add_state (uint8 state) {
-			begin_param (STATE, 1)
-				.append_uint8 (state);
+		public unowned PairingParamsBuilder add_identifier (string identifier) {
+			begin_param (IDENTIFIER, identifier.data.length)
+				.append_data (identifier.data);
+
 			return this;
 		}
 
 		public unowned PairingParamsBuilder add_public_key (Key key) {
-			size_t pubkey_size = 0;
-			key.get_raw_public_key (null, ref pubkey_size);
-			var pubkey = new uint8[pubkey_size];
-			key.get_raw_public_key (pubkey, ref pubkey_size);
+			uint8[] pubkey = get_raw_public_key (key);
 
 			begin_param (PUBLIC_KEY, pubkey.length)
 				.append_data (pubkey);
+
+			return this;
+		}
+
+		public unowned PairingParamsBuilder add_encrypted_data (uint8[] data) {
+			begin_param (ENCRYPTED_DATA, data.length)
+				.append_data (data);
+
+			return this;
+		}
+
+		public unowned PairingParamsBuilder add_state (uint8 state) {
+			begin_param (STATE, 1)
+				.append_uint8 (state);
+
+			return this;
+		}
+
+		public unowned PairingParamsBuilder add_signature (uint8[] signature) {
+			begin_param (SIGNATURE, signature.length)
+				.append_data (signature);
 
 			return this;
 		}
@@ -754,6 +808,11 @@ namespace Frida.XPC {
 							throw new Error.INVALID_ARGUMENT ("Invalid state value");
 						val = new Variant.byte (val_bytes[0]);
 						break;
+					case ERROR:
+						if (val_bytes.length != 1)
+							throw new Error.INVALID_ARGUMENT ("Invalid error value");
+						val = new Variant.byte (val_bytes[0]);
+						break;
 					default:
 						val = Variant.new_from_data (byte_array, val_bytes.get_data (), true, val_bytes);
 						break;
@@ -787,9 +846,12 @@ namespace Frida.XPC {
 	}
 
 	private enum PairingParamType {
-		PUBLIC_KEY = 3,
-		ENCRYPTED_DATA = 5,
-		STATE = 6,
+		IDENTIFIER	= 1,
+		PUBLIC_KEY	= 3,
+		ENCRYPTED_DATA	= 5,
+		STATE		= 6,
+		ERROR		= 7,
+		SIGNATURE	= 10,
 	}
 
 	public class AppService : TrustedService {
@@ -2356,6 +2418,14 @@ namespace Frida.XPC {
 	namespace SerializedObject {
 		public const uint32 MAGIC = 0x42133742;
 		public const uint32 VERSION = 5;
+	}
+
+	private uint8[] get_raw_public_key (Key key) {
+		size_t size = 0;
+		key.get_raw_public_key (null, ref size);
+		var pubkey = new uint8[size];
+		key.get_raw_public_key (pubkey, ref size);
+		return pubkey;
 	}
 
 	// https://gist.github.com/phako/96b36b5070beaf7eee27

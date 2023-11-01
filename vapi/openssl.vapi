@@ -23,9 +23,16 @@ namespace OpenSSL {
 		public class Key {
 			[CCode (cname = "EVP_PKEY_new_raw_public_key")]
 			public Key.from_raw_public_key (KeyType type, Engine? engine, uint8[] pub);
+			[CCode (cname = "EVP_PKEY_new_raw_private_key")]
+			public Key.from_raw_private_key (KeyType type, Engine? engine, uint8[] priv);
 
 			public int get_raw_public_key ([CCode (array_length = false)] uint8[]? pub, ref size_t len);
 			public int get_raw_private_key ([CCode (array_length = false)] uint8[]? priv, ref size_t len);
+		}
+
+		[Compact]
+		[CCode (cname = "EVP_PKEY_CTX", cprefix = "EVP_PKEY_CTX_")]
+		public class PublicKeyContext {
 		}
 
 		[CCode (cname = "int", cprefix = "EVP_PKEY_", has_type_id = false)]
@@ -152,6 +159,27 @@ namespace OpenSSL {
 		[CCode (cname = "EVP_CIPHER", cprefix = "EVP_CIPHER_")]
 		public class Cipher {
 			public static Cipher? fetch (LibraryContext? ctx, string algorithm, string? properties = null);
+		}
+
+		[Compact]
+		[CCode (cname = "EVP_MD_CTX", cprefix = "EVP_MD_CTX_")]
+		public class MessageDigestContext {
+			public MessageDigestContext ();
+
+			[CCode (cname = "EVP_DigestSignInit")]
+			public int digest_sign_init (PublicKeyContext ** pctx, MessageDigest? type, Engine? engine = null, Key? key = null);
+			[CCode (cname = "EVP_DigestSignUpdate")]
+			public int digest_sign_update (uint8[] data);
+			[CCode (cname = "EVP_DigestSignFinal")]
+			public int digest_sign_final ([CCode (array_length = false)] uint8[]? sigret, ref size_t siglen);
+			[CCode (cname = "EVP_DigestSign")]
+			public int digest_sign ([CCode (array_length = false)] uint8[]? sigret, ref size_t siglen, uint8[] tbs);
+		}
+
+		[Compact]
+		[CCode (cname = "EVP_MD", cprefix = "EVP_MD_")]
+		public class MessageDigest {
+			public static MessageDigest fetch (LibraryContext? ctx, string algorithm, string? properties = null);
 		}
 	}
 
