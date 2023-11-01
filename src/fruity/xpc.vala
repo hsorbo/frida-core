@@ -518,50 +518,31 @@ namespace Frida.XPC {
 				.build ();
 
 			var start_response = yield request_pairing_data (start_payload, cancellable);
-			uint8[] raw_device_pubkey = start_response
-				.read_member ("public-key")
-				.get_data_value ().get_data ();
+			uint8[] raw_device_pubkey = start_response.read_member ("public-key").get_data_value ().get_data ();
 			var device_pubkey = new Key.from_raw_public_key (X25519, null, raw_device_pubkey);
 
 			Bytes encryption_key = derive_shared_key (host_keypair, device_pubkey);
 
-			Bytes derived_key = derive_chacha_key (encryption_key.get_data (),
+			Bytes derived_key = derive_chacha_key (encryption_key,
 				"Pair-Verify-Encrypt-Info",
 				"Pair-Verify-Encrypt-Salt");
 
-			var cipher_ctx = new CipherContext ();
-			var cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
-			unowned string iv = "\x00\x00\x00\x00PV-Msg03";
-			cipher_ctx.encrypt_init (cipher, derived_key.get_data (), iv.data[:12]);
+			var cipher = new ChaCha20Poly1305 (derived_key, new Bytes.static ("\x00\x00\x00\x00PV-Msg03".data[:12]));
 
-			var mdc = new MessageDigestContext ();
-			mdc.digest_sign_init (null, null, null, pair_record_key);
-			var blob = new ByteArray.sized (100);
-			blob.append (get_raw_public_key (host_keypair));
-			blob.append (host_identifier.data);
-			blob.append (raw_device_pubkey);
-			size_t siglen = 0;
-			mdc.digest_sign (null, ref siglen, blob.data);
-			var signature = new uint8[siglen];
-			mdc.digest_sign (signature, ref siglen, blob.data);
+			var message = new ByteArray.sized (100);
+			message.append (get_raw_public_key (host_keypair).get_data ());
+			message.append (host_identifier.data);
+			message.append (raw_device_pubkey);
+			Bytes signature = compute_message_signature (new Bytes.static (message.data), pair_record_key);
 
 			Bytes inner_params = new PairingParamsBuilder ()
 				.add_identifier (host_identifier)
 				.add_signature (signature)
 				.build ();
-			size_t cleartext_size = inner_params.get_size ();
-			size_t tag_size = 16;
-			var encrypted_inner_params = new uint8[cleartext_size + tag_size];
-			int encrypted_inner_params_size = (int) cleartext_size;
-			cipher_ctx.encrypt_update (encrypted_inner_params, ref encrypted_inner_params_size, inner_params.get_data ());
-			int extra_size = encrypted_inner_params.length - encrypted_inner_params_size;
-			cipher_ctx.encrypt_final (encrypted_inner_params[encrypted_inner_params_size:], ref extra_size);
-			assert (extra_size == 0);
-			cipher_ctx.ctrl (AEAD_GET_TAG, (int) tag_size, (void *) encrypted_inner_params[encrypted_inner_params_size:]);
 
 			Bytes outer_params = new PairingParamsBuilder ()
 				.add_state (3)
-				.add_encrypted_data (encrypted_inner_params)
+				.add_encrypted_data (cipher.encrypt_message (inner_params))
 				.build ();
 
 			Bytes finish_payload = new ObjectBuilder ()
@@ -737,17 +718,17 @@ namespace Frida.XPC {
 		}
 
 		public unowned PairingParamsBuilder add_public_key (Key key) {
-			uint8[] pubkey = get_raw_public_key (key);
+			Bytes pubkey = get_raw_public_key (key);
 
 			begin_param (PUBLIC_KEY, pubkey.length)
-				.append_data (pubkey);
+				.append_bytes (pubkey);
 
 			return this;
 		}
 
-		public unowned PairingParamsBuilder add_encrypted_data (uint8[] data) {
-			begin_param (ENCRYPTED_DATA, data.length)
-				.append_data (data);
+		public unowned PairingParamsBuilder add_encrypted_data (Bytes bytes) {
+			begin_param (ENCRYPTED_DATA, bytes.length)
+				.append_bytes (bytes);
 
 			return this;
 		}
@@ -759,9 +740,9 @@ namespace Frida.XPC {
 			return this;
 		}
 
-		public unowned PairingParamsBuilder add_signature (uint8[] signature) {
+		public unowned PairingParamsBuilder add_signature (Bytes signature) {
 			begin_param (SIGNATURE, signature.length)
-				.append_data (signature);
+				.append_bytes (signature);
 
 			return this;
 		}
@@ -2428,12 +2409,14 @@ namespace Frida.XPC {
 		public const uint32 VERSION = 5;
 	}
 
-	private uint8[] get_raw_public_key (Key key) {
+	private Bytes get_raw_public_key (Key key) {
 		size_t size = 0;
 		key.get_raw_public_key (null, ref size);
+
 		var pubkey = new uint8[size];
 		key.get_raw_public_key (pubkey, ref size);
-		return pubkey;
+
+		return new Bytes.take ((owned) pubkey);
 	}
 
 	private Key make_x25519_keypair () {
@@ -2451,40 +2434,93 @@ namespace Frida.XPC {
 		ctx.derive_init ();
 		ctx.derive_set_peer (remote_pubkey);
 
-		size_t key_size = 0;
-		ctx.derive (null, ref key_size);
+		size_t size = 0;
+		ctx.derive (null, ref size);
 
-		var shared_key = new uint8[key_size];
-		ctx.derive (shared_key, ref key_size);
+		var shared_key = new uint8[size];
+		ctx.derive (shared_key, ref size);
 
 		return new Bytes.take ((owned) shared_key);
 	}
 
-	private Bytes derive_chacha_key (uint8[] shared_key, string info, string? salt = null) {
+	private Bytes derive_chacha_key (Bytes shared_key, string info, string? salt = null) {
 		var kdf = KeyDerivationFunction.fetch (null, KeyDerivationAlgorithm.HKDF);
 
 		var kdf_ctx = new KeyDerivationContext (kdf);
 
 		size_t return_size = OpenSSL.ParamReturnSize.UNMODIFIED;
 
-		var kdf_params = new OpenSSL.Param[] {
+		OpenSSL.Param kdf_params[] = {
 			{ KeyDerivationParameter.DIGEST, UTF8_STRING, OpenSSL.ShortName.sha512.data, return_size },
-			{ KeyDerivationParameter.KEY, OCTET_STRING, shared_key, return_size },
+			{ KeyDerivationParameter.KEY, OCTET_STRING, shared_key.get_data (), return_size },
 			{ KeyDerivationParameter.INFO, OCTET_STRING, info.data, return_size },
+			{ (salt != null) ? KeyDerivationParameter.SALT : null, OCTET_STRING, (salt != null) ? salt.data : null,
+				return_size },
+			{ null, INTEGER, null, return_size },
 		};
-
-		if (salt != null) {
-			OpenSSL.Param p = { KeyDerivationParameter.SALT, OCTET_STRING, salt.data, return_size };
-			kdf_params += p;
-		}
-
-		OpenSSL.Param terminator = { null, INTEGER, null, return_size };
-		kdf_params += terminator;
 
 		var derived_key = new uint8[32];
 		kdf_ctx.derive (derived_key, kdf_params);
 
 		return new Bytes.take ((owned) derived_key);
+	}
+
+	private Bytes compute_message_signature (Bytes message, Key key) {
+		var ctx = new MessageDigestContext ();
+		ctx.digest_sign_init (null, null, null, key);
+
+		unowned uint8[] data = message.get_data ();
+
+		size_t size = 0;
+		ctx.digest_sign (null, ref size, data);
+
+		var signature = new uint8[size];
+		ctx.digest_sign (signature, ref size, data);
+
+		return new Bytes.take ((owned) signature);
+	}
+
+	private class ChaCha20Poly1305 {
+		private Bytes key;
+		private Bytes iv;
+
+		private Cipher cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
+		private CipherContext? cached_ctx;
+
+		public ChaCha20Poly1305 (Bytes key, Bytes iv) {
+			this.key = key;
+			this.iv = iv;
+		}
+
+		public Bytes encrypt_message (Bytes message) {
+			size_t cleartext_size = message.get_size ();
+			size_t tag_size = 16;
+			var buf = new uint8[cleartext_size + tag_size];
+
+			unowned CipherContext ctx = get_context ();
+
+			int size = buf.length;
+			ctx.encrypt_update (buf, ref size, message.get_data ());
+
+			int extra_size = buf.length - size;
+			ctx.encrypt_final (buf[size:], ref extra_size);
+			assert (extra_size == 0);
+
+			ctx.ctrl (AEAD_GET_TAG, (int) tag_size, (void *) buf[size:]);
+
+			return new Bytes.take ((owned) buf);
+		}
+
+		private unowned CipherContext get_context () {
+			if (cached_ctx == null)
+				cached_ctx = new CipherContext ();
+			else
+				cached_ctx.reset ();
+
+			cached_ctx.encrypt_init (cipher, key.get_data (), iv.get_data ());
+
+			return cached_ctx;
+		}
 	}
 
 	// https://gist.github.com/phako/96b36b5070beaf7eee27
