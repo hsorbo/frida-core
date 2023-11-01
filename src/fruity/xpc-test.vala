@@ -44,6 +44,8 @@ namespace Frida.Fruity.XPC {
 			printerr ("%s\n", di.to_string ());
 			printerr ("%s\n", di.kvs.to_xml ());
 
+			yield tunnel.create_listener (cancellable);
+
 			yield;
 		} catch (Error e) {
 			printerr ("%s\n", e.message);
