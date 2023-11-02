@@ -477,11 +477,85 @@ namespace Frida.Fruity.XPC {
 			connection.cancel ();
 		}
 
-		public async void create_listener (Cancellable? cancellable = null) throws Error, IOError {
-			unowned string request = """{"request": {"_0": {"createListener": {"key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvxGoUUKGs9iwCciGSLXugDmRsW7vGowuIIc6LgTmCAPX4HNhRmvmB2j7Thb8vc0kFNTr/qbfj1LB/kgjAe6LLHaJtlUZB7x50bldnAwcYHXaugzyilTyolE81d1pnjBv+WbpvErTR5pbn8quTfeN3sStLqr/BJZ2Uqxy/NLTxjINHoO3UEsxQSQ1b2dRzQ2dofIooNGT42Ljdj/SPc9HOpVdv7FzqtMnHAjCuhjOopFFtH8FUXRMYpk1YeaYxVn9r7FIj2f/LDSL7aAHbgoKMd6dUM8ZZRT+vuzAl6XRNZG77h1CgxwjxsrZ1XGdikBneB8dxiDjfO/l07b20G4eiwIDAQAB", "transportProtocolType": "quic"}}}}""";
-			printerr ("Performing request: %s\n", request);
+		public async void create_listener (string device_address, Cancellable? cancellable = null) throws Error, IOError {
+			string request = Json.to_string (
+				new Json.Builder ()
+				.begin_object ()
+					.set_member_name ("request")
+					.begin_object ()
+						.set_member_name ("_0")
+						.begin_object ()
+							.set_member_name ("createListener")
+							.begin_object ()
+								.set_member_name ("transportProtocolType")
+								.add_string_value ("udp")
+								.set_member_name ("key")
+								.add_string_value ("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvxGoUUKGs9iwCciGSLXugDmRsW7vGowuIIc6LgTmCAPX4HNhRmvmB2j7Thb8vc0kFNTr/qbfj1LB/kgjAe6LLHaJtlUZB7x50bldnAwcYHXaugzyilTyolE81d1pnjBv+WbpvErTR5pbn8quTfeN3sStLqr/BJZ2Uqxy/NLTxjINHoO3UEsxQSQ1b2dRzQ2dofIooNGT42Ljdj/SPc9HOpVdv7FzqtMnHAjCuhjOopFFtH8FUXRMYpk1YeaYxVn9r7FIj2f/LDSL7aAHbgoKMd6dUM8ZZRT+vuzAl6XRNZG77h1CgxwjxsrZ1XGdikBneB8dxiDjfO/l07b20G4eiwIDAQAB")
+							.end_object ()
+						.end_object ()
+					.end_object ()
+				.end_object ()
+				.get_root (), false);
+
 			string response = yield request_encrypted (request, cancellable);
-			printerr ("Got response: %s\n", response);
+
+			Json.Reader reader;
+			try {
+				reader = new Json.Reader (Json.from_string (response));
+			} catch (GLib.Error e) {
+				throw new Error.PROTOCOL ("Invalid response JSON");
+			}
+
+			reader.read_member ("response");
+			reader.read_member ("_1");
+			reader.read_member ("createListener");
+
+			reader.read_member ("devicePublicKey");
+			string? device_pubkey = reader.get_string_value ();
+			reader.end_member ();
+
+			reader.read_member ("port");
+			uint16 port = (uint16) reader.get_int_value ();
+			reader.end_member ();
+
+			reader.read_member ("udpPort");
+			uint16 udp_port = (uint16) reader.get_int_value ();
+			reader.end_member ();
+
+			reader.read_member ("udpPSK");
+			string? udp_psk = reader.get_string_value ();
+			reader.end_member ();
+
+			GLib.Error? error = reader.get_error ();
+			if (error != null)
+				throw new Error.PROTOCOL ("Invalid response: %s", error.message);
+
+			printerr ("\n=== Yay:\n");
+			printerr (@"device_pubkey: \"$device_pubkey\"\n");
+			printerr (@"port: $port\n");
+			printerr (@"udp_port: $udp_port\n");
+			printerr (@"udp_psk: \"$udp_psk\"\n");
+
+			try {
+				var socket = new Socket (IPV6, DATAGRAM, UDP);
+				socket.connect (new InetSocketAddress.from_string (device_address, udp_port), cancellable);
+
+				var tc = DtlsClientConnection.new (socket, null);
+				tc.set_database (null);
+
+				tc.accept_certificate.connect ((peer_cert, errors) => {
+					printerr ("accept_certificate() yes!\n");
+					return true;
+				});
+
+				printerr (">>> handshake_async()\n");
+				yield tc.handshake_async (Priority.DEFAULT, cancellable);
+				printerr ("<<< handshake_async()\n");
+
+				printerr ("Handshake successful!\n");
+			} catch (GLib.Error e) {
+				throw new Error.TRANSPORT ("%s", e.message);
+			}
 		}
 
 		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
@@ -713,7 +787,7 @@ namespace Frida.Fruity.XPC {
 				.build ());
 		}
 
-		private async string request_encrypted (string payload, Cancellable? cancellable) throws Error, IOError {
+		private async string request_encrypted (string json, Cancellable? cancellable) throws Error, IOError {
 			uint64 seqno = next_control_sequence_number++;
 			var promise = new Promise<ObjectReader> ();
 			requests[seqno] = promise;
@@ -738,7 +812,7 @@ namespace Frida.Fruity.XPC {
 							.set_member_name ("streamEncrypted")
 							.begin_dictionary ()
 								.set_member_name ("_0")
-								.add_data_value (client_cipher.encrypt (iv, new Bytes.static (payload.data)))
+								.add_data_value (client_cipher.encrypt (iv, new Bytes.static (json.data)))
 							.end_dictionary ()
 						.end_dictionary ()
 					.end_dictionary ()
