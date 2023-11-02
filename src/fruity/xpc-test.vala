@@ -5,7 +5,9 @@ namespace Frida.Fruity.XPC {
 	private Cancellable? cancellable = null;
 
 	private int main (string[] args) {
-		var loop = new MainLoop ();
+		Frida.init_with_runtime (GLIB);
+
+		var loop = new MainLoop (Frida.get_main_context ());
 		test_xpc.begin ();
 		loop.run ();
 
@@ -26,12 +28,12 @@ namespace Frida.Fruity.XPC {
 			});
 			yield;
 
-			printerr ("\n=== Got:\n");
-			foreach (var service in services) {
-				printerr ("\t%s\n", service.to_string ());
-				yield dump_service (service);
-			}
-			printerr ("\n");
+			//printerr ("\n=== Got:\n");
+			//foreach (var service in services) {
+			//	printerr ("\t%s\n", service.to_string ());
+			//	yield dump_service (service);
+			//}
+			//printerr ("\n");
 
 			Device device = yield pick_device (services, cancellable);
 			printerr ("Opened device.address=\"%s\" disco=%p\n", device.address, device.disco);
@@ -44,7 +46,7 @@ namespace Frida.Fruity.XPC {
 			printerr ("%s\n", di.to_string ());
 			printerr ("%s\n", di.kvs.to_xml ());
 
-			yield tunnel.create_listener (cancellable);
+			yield tunnel.create_listener (device.address, cancellable);
 
 			yield;
 		} catch (Error e) {
@@ -57,6 +59,11 @@ namespace Frida.Fruity.XPC {
 	private async Device pick_device (PairingService[] services, Cancellable? cancellable) throws Error, IOError {
 		foreach (PairingService service in services) {
 			foreach (PairingServiceHost host in yield service.resolve (cancellable)) {
+				if (host.name != "iPad.local.") {
+					printerr ("Skipping: %s\n", host.to_string ());
+					continue;
+				}
+
 				foreach (InetSocketAddress address in yield host.resolve (cancellable)) {
 					string candidate_address = address.to_string ();
 
@@ -79,6 +86,9 @@ namespace Frida.Fruity.XPC {
 
 					try {
 						var disco = yield DiscoveryService.open (connection, cancellable);
+
+						printerr ("Connected through interface %s\n", service.interface_name);
+
 						return new Device () {
 							address = candidate_address,
 							disco = disco,
