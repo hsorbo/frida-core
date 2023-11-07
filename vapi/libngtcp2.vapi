@@ -42,6 +42,7 @@ namespace NGTCP2 {
 		INET6,
 	}
 
+	[SimpleType]
 	[CCode (cname = "ngtcp2_in_port")]
 	public struct InternetPort : uint16 {
 	}
@@ -79,6 +80,7 @@ namespace NGTCP2 {
 		public uint32 sin6_scope_id;
 	}
 
+	[SimpleType]
 	[CCode (cname = "ngtcp2_socklen")]
 	public struct SocketLength : uint32 {
 	}
@@ -96,7 +98,16 @@ namespace NGTCP2 {
 		public SocketAddressInternet6 ipv6;
 		public uint8 ipv4_present;
 		public uint8 ipv6_present;
-		public uint8 stateless_reset_token[];
+		public uint8 stateless_reset_token[STATELESS_RESET_TOKENLEN];
+	}
+
+	public const size_t STATELESS_RESET_TOKENLEN;
+
+	[CCode (cname = "ngtcp2_version_info")]
+	public struct VersionInfo {
+		public uint32 chosen_version;
+		[CCode (array_length_cname = "available_versionslen")]
+		public uint8[] available_versions;
 	}
 
 	[CCode (cname = "uint32_t", cprefix = "NGTCP2_PROTO_VER_", has_type_id = false)]
@@ -131,13 +142,20 @@ namespace NGTCP2 {
 
 	[CCode (cname = "ngtcp2_pkt_stateless_reset")]
 	public struct PacketStatelessReset {
-		public uint8 stateless_reset_token[];
+		public uint8 stateless_reset_token[STATELESS_RESET_TOKENLEN];
 		[CCode (array_length_cname = "randlen")]
 		public uint8[] rand;
 	}
 
+	[CCode (cname = "ngtcp2_token_type", cprefix = "NGTCP2_TOKEN_TYPE_", has_type_id = false)]
+	public enum TokenType {
+		UNKNOWN,
+		RETRY,
+		NEW_TOKEN,
+	}
+
 	[CCode (cname = "ngtcp2_rand_ctx")]
-	public struct RandCtx {
+	public struct RNGContext {
 		public void * native_handle;
 	}
 
@@ -160,6 +178,23 @@ namespace NGTCP2 {
 	[CCode (cname = "ngtcp2_crypto_cipher_ctx")]
 	public struct CryptoCipherCtx {
 		public void * native_handle;
+	}
+
+	[CCode (cname = "ngtcp2_cc_algo", cprefix = "NGTCP2_CC_ALGO_", has_type_id = false)]
+	public enum CongestionControlAlgorithm {
+		RENO,
+		CUBIC,
+		BBR,
+	}
+
+	[SimpleType]
+	[CCode (cname = "ngtcp2_tstamp")]
+	public struct Timestamp : uint64 {
+	}
+
+	[SimpleType]
+	[CCode (cname = "ngtcp2_duration")]
+	public struct Duration : uint64 {
 	}
 
 	[CCode (cname = "int", cprefix = "NGTCP2_CALLBACKS_", has_type_id = false)]
@@ -259,7 +294,7 @@ namespace NGTCP2 {
 	public delegate int ExtendMaxStreamData (Connection conn, int64 stream_id, uint64 max_data, void * user_data,
 		void * stream_user_data);
 	[CCode (cname = "ngtcp2_rand", has_target = false)]
-	public delegate void Rand ([CCode (array_length_type = "size_t")] uint8[] dest, RandCtx rand_ctx);
+	public delegate void Rand ([CCode (array_length_type = "size_t")] uint8[] dest, RNGContext rand_ctx);
 	[CCode (cname = "ngtcp2_get_new_connection_id", has_target = false)]
 	public delegate int GetNewConnectionId (Connection conn, ConnectionID cid, [CCode (array_length = false)] uint8[] token,
 		size_t cidlen, void * user_data);
@@ -311,4 +346,97 @@ namespace NGTCP2 {
 	public delegate int RecvKey (Connection conn, EncryptionLevel level, void * user_data);
 	[CCode (cname = "ngtcp2_tls_early_data_rejected", has_target = false)]
 	public delegate int TlsEarlyDataRejected (Connection conn, void * user_data);
+
+	[CCode (cname = "int", cprefix = "NGTCP2_SETTINGS_", has_type_id = false)]
+	public enum SettingsVersion {
+		[CCode (cname = "NGTCP2_SETTINGS_VERSION")]
+		DEFAULT,
+		V1,
+	}
+
+	[CCode (cname = "ngtcp2_callbacks")]
+	public struct Settings {
+		public QlogWrite? qlog_write;
+		public CongestionControlAlgorithm cc_algo;
+		public Timestamp initial_ts;
+		public Duration initial_rtt;
+		public Printf? log_printf;
+		public size_t max_tx_udp_payload_size;
+		[CCode (array_length_cname = "tokenlen")]
+		public uint8[]? token;
+		public TokenType token_type;
+		public RNGContext rand_ctx;
+		public uint64 max_window;
+		public uint64 max_stream_window;
+		public size_t ack_thresh;
+		public bool no_tx_udp_payload_size_shaping;
+		public Duration handshake_timeout;
+		[CCode (array_length_cname = "preferred_versionslen")]
+		public ProtocolVersion[]? preferred_versions;
+		[CCode (array_length_cname = "available_versionslen")]
+		public ProtocolVersion[]? available_versions;
+		public uint32 original_version;
+		public bool no_pmtud;
+		public uint32 initial_pkt_num;
+	}
+
+	[CCode (cname = "ngtcp2_qlog_write", has_target = false)]
+	public delegate void QlogWrite (void * user_data, uint32 flags, [CCode (array_length_type = "size_t")] uint8[] data);
+	[CCode (cname = "ngtcp2_printf", has_target = false)]
+	public delegate void Printf (void * user_data, string format, ...);
+
+	[CCode (cname = "int", cprefix = "NGTCP2_TRANSPORT_PARAMS_", has_type_id = false)]
+	public enum TransportParamsVersion {
+		[CCode (cname = "NGTCP2_TRANSPORT_PARAMS_VERSION")]
+		DEFAULT,
+		V1,
+	}
+
+	[CCode (cname = "ngtcp2_transport_params")]
+	public struct TransportParams {
+		public PreferredAddress preferred_addr;
+		public ConnectionID original_dcid;
+		public ConnectionID initial_scid;
+		public ConnectionID retry_scid;
+		public uint64 initial_max_stream_data_bidi_local;
+		public uint64 initial_max_stream_data_bidi_remote;
+		public uint64 initial_max_stream_data_uni;
+		public uint64 initial_max_data;
+		public uint64 initial_max_streams_bidi;
+		public uint64 initial_max_streams_uni;
+		public Duration max_idle_timeout;
+		public uint64 max_udp_payload_size;
+		public uint64 active_connection_id_limit;
+		public uint64 ack_delay_exponent;
+		public Duration max_ack_delay;
+		public uint64 max_datagram_frame_size;
+		public bool stateless_reset_token_present;
+		public bool disable_active_migration;
+		public bool original_dcid_present;
+		public bool initial_scid_present;
+		public bool retry_scid_present;
+		public bool preferred_addr_present;
+		public uint8 stateless_reset_token[STATELESS_RESET_TOKENLEN];
+		public bool grease_quic_bit;
+		public VersionInfo version_info;
+		public bool version_info_present;
+	}
+
+	[CCode (cname = "ngtcp2_mem")]
+	public struct MemoryAllocator {
+		public void * user_data;
+		public Malloc malloc;
+		public Free free;
+		public Calloc calloc;
+		public Realloc realloc;
+	}
+
+	[CCode (cname = "ngtcp2_malloc", has_target = false)]
+	public delegate void * Malloc (size_t size, void * user_data);
+	[CCode (cname = "ngtcp2_free", has_target = false)]
+	public delegate void Free (void * ptr, void * user_data);
+	[CCode (cname = "ngtcp2_calloc", has_target = false)]
+	public delegate void * Calloc (size_t nmemb, size_t size, void * user_data);
+	[CCode (cname = "ngtcp2_realloc", has_target = false)]
+	public delegate void * Realloc (void * ptr, size_t size, void * user_data);
 }
