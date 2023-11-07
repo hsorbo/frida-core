@@ -16,6 +16,12 @@ namespace NGTCP2 {
 		public uint8[] data;
 	}
 
+	[CCode (cname = "ngtcp2_connection_id_status_type", cprefix = "NGTCP2_CONNECTION_ID_STATUS_TYPE_", has_type_id = false)]
+	public enum ConnectionIdStatusType {
+		ACTIVATE,
+		DEACTIVATE,
+	}
+
 	[CCode (cname = "ngtcp2_path")]
 	public struct Path {
 		public Address local;
@@ -23,16 +29,11 @@ namespace NGTCP2 {
 		public void * user_data;
 	}
 
-	[CCode (cname = "ngtcp2_addr")]
-	public struct Address {
-		public SocketAddress? addr;
-		public SocketLength addrlen;
-	}
-
-	[CCode (cname = "ngtcp2_sockaddr")]
-	public struct SocketAddress {
-		public SocketAddressFamily sa_family;
-		public uint8 sa_data[14];
+	[CCode (cname = "ngtcp2_path_validation_result", cprefix = "NGTCP2_PATH_VALIDATION_RESULT_", has_type_id = false)]
+	public enum PathValidationResult {
+		SUCCESS,
+		FAILURE,
+		ABORTED,
 	}
 
 	[CCode (cname = "ngtcp2_sa_family", cprefix = "NGTCP2_AF_", has_type_id = false)]
@@ -41,8 +42,61 @@ namespace NGTCP2 {
 		INET6,
 	}
 
+	[CCode (cname = "ngtcp2_in_port")]
+	public struct InternetPort : uint16 {
+	}
+
+	[CCode (cname = "ngtcp2_sockaddr")]
+	public struct SocketAddress {
+		public SocketAddressFamily sa_family;
+		public uint8 sa_data[14];
+	}
+
+	[CCode (cname = "ngtcp2_in_addr")]
+	public struct InternetAddress {
+		public uint32 s_addr;
+	}
+
+	[CCode (cname = "ngtcp2_sockaddr_in")]
+	public struct SocketAddressInternet {
+		public SocketAddressFamily sin_family;
+		public InternetPort sin_port;
+		public InternetAddress sin_addr;
+		public uint8 sin_zero[8];
+	}
+
+	[CCode (cname = "ngtcp2_in6_addr")]
+	public struct Internet6Address {
+		public uint8 in6_addr[16];
+	}
+
+	[CCode (cname = "ngtcp2_sockaddr_in6")]
+	public struct SocketAddressInternet6 {
+		public SocketAddressFamily sin6_family;
+		public InternetPort sin6_port;
+		public uint32 sin6_flowinfo;
+		public Internet6Address sin6_addr;
+		public uint32 sin6_scope_id;
+	}
+
 	[CCode (cname = "ngtcp2_socklen")]
 	public struct SocketLength : uint32 {
+	}
+
+	[CCode (cname = "ngtcp2_addr")]
+	public struct Address {
+		public SocketAddress? addr;
+		public SocketLength addrlen;
+	}
+
+	[CCode (cname = "ngtcp2_preferred_addr")]
+	public struct PreferredAddress {
+		public ConnectionID cid;
+		public SocketAddressInternet ipv4;
+		public SocketAddressInternet6 ipv6;
+		public uint8 ipv4_present;
+		public uint8 ipv6_present;
+		public uint8 stateless_reset_token[];
 	}
 
 	[CCode (cname = "uint32_t", cprefix = "NGTCP2_PROTO_VER_", has_type_id = false)]
@@ -51,6 +105,61 @@ namespace NGTCP2 {
 		V2,
 		MIN,
 		MAX,
+	}
+
+	[CCode (cname = "ngtcp2_encryption_level", cprefix = "NGTCP2_ENCRYPTION_LEVEL_", has_type_id = false)]
+	public enum EncryptionLevel {
+		INITIAL,
+		HANDSHAKE,
+		1RTT,
+		0RTT,
+	}
+
+	[CCode (cname = "ngtcp2_pkt_hd")]
+	public struct PacketHeader {
+		public ConnectionID dcid;
+		public ConnectionID scid;
+		public int64 pkt_num;
+		[CCode (array_length_cname = "tokenlen")]
+		public uint8[]? token;
+		public size_t pkt_numlen;
+		public size_t len;
+		public uint32 version;
+		public uint8 type;
+		public uint8 flags;
+	}
+
+	[CCode (cname = "ngtcp2_pkt_stateless_reset")]
+	public struct PacketStatelessReset {
+		public uint8 stateless_reset_token[];
+		[CCode (array_length_cname = "randlen")]
+		public uint8[] rand;
+	}
+
+	[CCode (cname = "ngtcp2_rand_ctx")]
+	public struct RandCtx {
+		public void * native_handle;
+	}
+
+	[CCode (cname = "ngtcp2_crypto_aead")]
+	public struct CryptoAead {
+		public void * native_handle;
+		public size_t max_overhead;
+	}
+
+	[CCode (cname = "ngtcp2_crypto_cipher")]
+	public struct CryptoCipher {
+		public void * native_handle;
+	}
+
+	[CCode (cname = "ngtcp2_crypto_aead_ctx")]
+	public struct CryptoAeadCtx {
+		public void * native_handle;
+	}
+
+	[CCode (cname = "ngtcp2_crypto_cipher_ctx")]
+	public struct CryptoCipherCtx {
+		public void * native_handle;
 	}
 
 	[CCode (cname = "int", cprefix = "NGTCP2_CALLBACKS_", has_type_id = false)]
@@ -107,10 +216,10 @@ namespace NGTCP2 {
 	[CCode (cname = "ngtcp2_client_initial", has_target = false)]
 	public delegate int ClientInitial (Connection conn, void * user_data);
 	[CCode (cname = "ngtcp2_recv_client_initial", has_target = false)]
-	public delegate int RecvClientInitial (Connection conn, Cid dcid, void * user_data);
+	public delegate int RecvClientInitial (Connection conn, ConnectionID dcid, void * user_data);
 	[CCode (cname = "ngtcp2_recv_crypto_data", has_target = false)]
 	public delegate int RecvCryptoData (Connection conn, EncryptionLevel encryption_level, uint64 offset,
-		[CCode (array_length_type = "size_t")] uint8_t[] data, void * user_data);
+		[CCode (array_length_type = "size_t")] uint8[] data, void * user_data);
 	[CCode (cname = "ngtcp2_handshake_completed", has_target = false)]
 	public delegate int HandshakeCompleted (Connection conn, void * user_data);
 	[CCode (cname = "ngtcp2_recv_version_negotiation", has_target = false)]
@@ -127,8 +236,8 @@ namespace NGTCP2 {
 		[CCode (array_length_type = "size_t")] uint8[] nonce,
 		[CCode (array_length_type = "size_t")] uint8[] aad);
 	[CCode (cname = "ngtcp2_hp_mask", has_target = false)]
-	public delegate int HpMask ([CCode (array_length = false)] uint8_t[] dest, CryptoCipher hp, CryptoCipherCtx hp_ctx,
-		[CCode (array_length = false)] uint8_t[] sample);
+	public delegate int HpMask ([CCode (array_length = false)] uint8[] dest, CryptoCipher hp, CryptoCipherCtx hp_ctx,
+		[CCode (array_length = false)] uint8[] sample);
 	[CCode (cname = "ngtcp2_recv_stream_data", has_target = false)]
 	public delegate int RecvStreamData (Connection conn, uint32 flags, int64 stream_id, uint64 offset,
 		[CCode (array_length_type = "size_t")] uint8[] data, void * user_data, void * stream_user_data);
@@ -152,10 +261,10 @@ namespace NGTCP2 {
 	[CCode (cname = "ngtcp2_rand", has_target = false)]
 	public delegate void Rand ([CCode (array_length_type = "size_t")] uint8[] dest, RandCtx rand_ctx);
 	[CCode (cname = "ngtcp2_get_new_connection_id", has_target = false)]
-	public delegate int GetNewConnectionId (Connection conn, Cid cid, [CCode (array_length = false)] uint8_t[] token, size_t cidlen,
-		void * user_data);
+	public delegate int GetNewConnectionId (Connection conn, ConnectionID cid, [CCode (array_length = false)] uint8[] token,
+		size_t cidlen, void * user_data);
 	[CCode (cname = "ngtcp2_remove_connection_id", has_target = false)]
-	public delegate int RemoveConnectionId (Connection conn, Cid cid, void * user_data);
+	public delegate int RemoveConnectionId (Connection conn, ConnectionID cid, void * user_data);
 	[CCode (cname = "ngtcp2_update_key", has_target = false)]
 	public delegate int UpdateKey (Connection conn,
 		[CCode (array_length = false)] uint8[] rx_secret,
@@ -169,12 +278,12 @@ namespace NGTCP2 {
 	public delegate int PathValidation (Connection conn, uint32 flags, Path path, Path old_path, PathValidationResult res,
 		void * user_data);
 	[CCode (cname = "ngtcp2_select_preferred_addr", has_target = false)]
-	public delegate int SelectPreferredAddr (Connection conn, Path dest, PreferredAddr paddr, void * user_data);
+	public delegate int SelectPreferredAddr (Connection conn, Path dest, PreferredAddress paddr, void * user_data);
 	[CCode (cname = "ngtcp2_stream_reset", has_target = false)]
 	public delegate int StreamReset (Connection conn, int64 stream_id, uint64 final_size, uint64 app_error_code, void * user_data,
 		void * stream_user_data);
 	[CCode (cname = "ngtcp2_connection_id_status", has_target = false)]
-	public delegate int ConnectionIdStatus (Connection conn, ConnectionIdStatusType type, uint64 seq, Cid cid,
+	public delegate int ConnectionIdStatus (Connection conn, ConnectionIdStatusType type, uint64 seq, ConnectionID cid,
 		[CCode (array_length = false)] uint8[] token, void * user_data);
 	[CCode (cname = "ngtcp2_handshake_confirmed", has_target = false)]
 	public delegate int HandshakeConfirmed (Connection conn, void * user_data);
@@ -197,7 +306,7 @@ namespace NGTCP2 {
 	public delegate int StreamStopSending (Connection conn, int64 stream_id, uint64 app_error_code, void * user_data,
 		void * stream_user_data);
 	[CCode (cname = "ngtcp2_version_negotiation", has_target = false)]
-	public delegate int VersionNegotiation (Connection conn, uint32 version, Cid client_dcid, void * user_data);
+	public delegate int VersionNegotiation (Connection conn, uint32 version, ConnectionID client_dcid, void * user_data);
 	[CCode (cname = "ngtcp2_recv_key", has_target = false)]
 	public delegate int RecvKey (Connection conn, EncryptionLevel level, void * user_data);
 	[CCode (cname = "ngtcp2_tls_early_data_rejected", has_target = false)]
