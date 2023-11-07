@@ -407,6 +407,8 @@ namespace Frida.Fruity.XPC {
 		public uint16 port;
 	}
 
+	private TunnelConnection tunnel_connection_todo;
+
 	public class TunnelService : Object, AsyncInitable {
 		public IOStream stream {
 			get;
@@ -524,45 +526,12 @@ namespace Frida.Fruity.XPC {
 			if (error != null)
 				throw new Error.PROTOCOL ("Invalid response: %s", error.message);
 
-			NGTCP2.Connection connection;
-			NGTCP2.Connection.make_client (out connection);
 			printerr ("\n=== Yay:\n");
 			printerr (@"device_pubkey: \"$device_pubkey\"\n");
 			printerr (@"port: $port\n");
 
-			for (uint i = 0; i != 3; i++) {
-				try {
-					var client = new SocketClient ();
-					printerr (">>> connect_async() [attempt=%u]\n", i + 1);
-					SocketConnection connection = yield client.connect_async (
-						new InetSocketAddress.from_string (device_address, port),
-						cancellable);
-					printerr ("<<< connect_async()\n");
-
-					var tc = TlsClientConnection.new (connection, null);
-					tc.set_database (null);
-
-					tc.accept_certificate.connect ((peer_cert, errors) => {
-						printerr ("accept_certificate() yes!\n");
-						return true;
-					});
-
-					printerr (">>> handshake_async()\n");
-					yield tc.handshake_async (Priority.DEFAULT, cancellable);
-					printerr ("<<< handshake_async()\n");
-
-					printerr ("Handshake successful!\n");
-					break;
-				} catch (GLib.Error e) {
-					printerr ("Nope: %s\n", e.message);
-
-					var source = new TimeoutSource.seconds (1);
-					source.set_callback (create_listener.callback);
-					source.attach (MainContext.get_thread_default ());
-					yield;
-					printerr ("\nTrying again...\n\n");
-				}
-			}
+			tunnel_connection_todo =
+				yield TunnelConnection.open (new InetSocketAddress.from_string (device_address, port), cancellable);
 		}
 
 		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
@@ -1037,6 +1006,85 @@ namespace Frida.Fruity.XPC {
 		STATE		= 6,
 		ERROR		= 7,
 		SIGNATURE	= 10,
+	}
+
+	private class TunnelConnection : Object, AsyncInitable {
+		public InetSocketAddress address {
+			get;
+			construct;
+		}
+
+		private Socket socket;
+		private NGTcp2.Connection connection;
+
+		public static async TunnelConnection open (InetSocketAddress address,
+				Cancellable? cancellable = null) throws Error, IOError {
+			var connection = new TunnelConnection (address);
+
+			try {
+				yield connection.init_async (Priority.DEFAULT, cancellable);
+			} catch (GLib.Error e) {
+				throw_api_error (e);
+			}
+
+			return connection;
+		}
+
+		private TunnelConnection (InetSocketAddress address) {
+			Object (address: address);
+		}
+
+		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
+			uint8[] local_address, remote_address;
+			try {
+				socket = new Socket (IPV6, DATAGRAM, UDP);
+				socket.connect (address, cancellable);
+
+				local_address = address_to_native (socket.get_local_address ());
+				remote_address = address_to_native (address);
+			} catch (GLib.Error e) {
+				throw new Error.TRANSPORT ("%s", e.message);
+			}
+
+			var dcid = NGTcp2.ConnectionID () {
+				datalen = NGTcp2.MIN_INITIAL_DCIDLEN,
+			};
+			OpenSSL.Rng.generate (dcid.data[:dcid.datalen]);
+
+			var scid = NGTcp2.ConnectionID () {
+				datalen = 8,
+			};
+			OpenSSL.Rng.generate (scid.data[:scid.datalen]);
+
+			NGTcp2.Path path = NGTcp2.Path () {
+				local = NGTcp2.Address () { addr = local_address },
+				remote = NGTcp2.Address () { addr = remote_address },
+			};
+
+			NGTcp2.Callbacks callbacks = {
+				// TODO
+			};
+
+			NGTcp2.Settings settings = {
+				// TODO
+			};
+
+			NGTcp2.TransportParams transport_params = {
+				// TODO
+			};
+
+			NGTcp2.Connection.make_client (out connection, dcid, scid, path, NGTcp2.ProtocolVersion.V1, callbacks, settings,
+				transport_params, null, this);
+
+			return true;
+		}
+
+		private static uint8[] address_to_native (SocketAddress address) throws GLib.Error {
+			var size = address.get_native_size ();
+			var buf = new uint8[size];
+			address.to_native (buf, size);
+			return buf;
+		}
 	}
 
 	public class AppService : TrustedService {

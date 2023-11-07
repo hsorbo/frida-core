@@ -283,4 +283,10 @@ namespace OpenSSL {
 		public const string sha512;
 		public const string chacha20_poly1305;
 	}
+
+	[CCode (cheader_filename = "openssl/rand.h")]
+	namespace Rng {
+		[CCode (cname = "RAND_bytes")]
+		public int generate (uint8[] buf);
+	}
 }
