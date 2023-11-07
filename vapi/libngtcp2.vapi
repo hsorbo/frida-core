@@ -1,20 +1,27 @@
-[CCode (cheader_filename = "ngtcp2/ngtcp2.h", cprefix = "ngtcp2_", gir_namespace = "NGTcp2", gir_version = "1.0")]
-namespace NGTCP2 {
+[CCode (cheader_filename = "ngtcp2/ngtcp2.h", gir_namespace = "NGTcp2", gir_version = "1.0")]
+namespace NGTcp2 {
 	[Compact]
 	[CCode (cname = "ngtcp2_conn", cprefix = "ngtcp2_conn_", free_function = "ngtcp2_conn_del")]
 	public class Connection {
-		[CCode (cname = "ngtcp2_conn_client_new_versioned")]
+		[CCode (cname = "ngtcp2_conn_client_new")]
 		public static int make_client (out Connection conn, ConnectionID dcid, ConnectionID scid, Path path,
-			ProtocolVersion client_chosen_version, CallbacksVersion callbacks_version, Callbacks callbacks,
-			SettingsVersion settings_version, Settings settings, TransportParamsVersion transport_params_version,
-			TransportParams params, MemoryAllocator mem, void * user_data);
+			ProtocolVersion client_chosen_version, Callbacks callbacks, Settings settings, TransportParams params,
+			MemoryAllocator? mem, void * user_data);
 	}
 
-	[CCode (cname = "ngtcp2_cid")]
+	[CCode (cname = "ngtcp2_cid", destroy_function = "")]
 	public struct ConnectionID {
-		[CCode (array_length_cname = "datalen")]
-		public uint8[] data;
+		public size_t datalen;
+		public uint8 data[MAX_CIDLEN];
 	}
+
+	[CCode (cname = "NGTCP2_MAX_CIDLEN")]
+	public const size_t MAX_CIDLEN;
+	[CCode (cname = "NGTCP2_MIN_INITIAL_DCIDLEN")]
+	public const size_t MIN_INITIAL_DCIDLEN;
+
+	[CCode (cname = "NGTCP2_STATELESS_RESET_TOKENLEN")]
+	public const size_t STATELESS_RESET_TOKENLEN;
 
 	[CCode (cname = "ngtcp2_connection_id_status_type", cprefix = "NGTCP2_CONNECTION_ID_STATUS_TYPE_", has_type_id = false)]
 	public enum ConnectionIdStatusType {
@@ -22,7 +29,7 @@ namespace NGTCP2 {
 		DEACTIVATE,
 	}
 
-	[CCode (cname = "ngtcp2_path")]
+	[CCode (cname = "ngtcp2_path", destroy_function = "")]
 	public struct Path {
 		public Address local;
 		public Address remote;
@@ -47,18 +54,18 @@ namespace NGTCP2 {
 	public struct InternetPort : uint16 {
 	}
 
-	[CCode (cname = "ngtcp2_sockaddr")]
+	[CCode (cname = "ngtcp2_sockaddr", destroy_function = "")]
 	public struct SocketAddress {
 		public SocketAddressFamily sa_family;
 		public uint8 sa_data[14];
 	}
 
-	[CCode (cname = "ngtcp2_in_addr")]
+	[CCode (cname = "ngtcp2_in_addr", destroy_function = "")]
 	public struct InternetAddress {
 		public uint32 s_addr;
 	}
 
-	[CCode (cname = "ngtcp2_sockaddr_in")]
+	[CCode (cname = "ngtcp2_sockaddr_in", destroy_function = "")]
 	public struct SocketAddressInternet {
 		public SocketAddressFamily sin_family;
 		public InternetPort sin_port;
@@ -66,12 +73,12 @@ namespace NGTCP2 {
 		public uint8 sin_zero[8];
 	}
 
-	[CCode (cname = "ngtcp2_in6_addr")]
+	[CCode (cname = "ngtcp2_in6_addr", destroy_function = "")]
 	public struct Internet6Address {
 		public uint8 in6_addr[16];
 	}
 
-	[CCode (cname = "ngtcp2_sockaddr_in6")]
+	[CCode (cname = "ngtcp2_sockaddr_in6", destroy_function = "")]
 	public struct SocketAddressInternet6 {
 		public SocketAddressFamily sin6_family;
 		public InternetPort sin6_port;
@@ -85,13 +92,13 @@ namespace NGTCP2 {
 	public struct SocketLength : uint32 {
 	}
 
-	[CCode (cname = "ngtcp2_addr")]
+	[CCode (cname = "ngtcp2_addr", destroy_function = "")]
 	public struct Address {
-		public SocketAddress? addr;
-		public SocketLength addrlen;
+		[CCode (array_length_cname = "addrlen")]
+		public uint8[] addr;
 	}
 
-	[CCode (cname = "ngtcp2_preferred_addr")]
+	[CCode (cname = "ngtcp2_preferred_addr", destroy_function = "")]
 	public struct PreferredAddress {
 		public ConnectionID cid;
 		public SocketAddressInternet ipv4;
@@ -101,9 +108,7 @@ namespace NGTCP2 {
 		public uint8 stateless_reset_token[STATELESS_RESET_TOKENLEN];
 	}
 
-	public const size_t STATELESS_RESET_TOKENLEN;
-
-	[CCode (cname = "ngtcp2_version_info")]
+	[CCode (cname = "ngtcp2_version_info", destroy_function = "")]
 	public struct VersionInfo {
 		public uint32 chosen_version;
 		[CCode (array_length_cname = "available_versionslen")]
@@ -126,7 +131,7 @@ namespace NGTCP2 {
 		0RTT,
 	}
 
-	[CCode (cname = "ngtcp2_pkt_hd")]
+	[CCode (cname = "ngtcp2_pkt_hd", destroy_function = "")]
 	public struct PacketHeader {
 		public ConnectionID dcid;
 		public ConnectionID scid;
@@ -140,7 +145,7 @@ namespace NGTCP2 {
 		public uint8 flags;
 	}
 
-	[CCode (cname = "ngtcp2_pkt_stateless_reset")]
+	[CCode (cname = "ngtcp2_pkt_stateless_reset", destroy_function = "")]
 	public struct PacketStatelessReset {
 		public uint8 stateless_reset_token[STATELESS_RESET_TOKENLEN];
 		[CCode (array_length_cname = "randlen")]
@@ -154,28 +159,28 @@ namespace NGTCP2 {
 		NEW_TOKEN,
 	}
 
-	[CCode (cname = "ngtcp2_rand_ctx")]
+	[CCode (cname = "ngtcp2_rand_ctx", destroy_function = "")]
 	public struct RNGContext {
 		public void * native_handle;
 	}
 
-	[CCode (cname = "ngtcp2_crypto_aead")]
+	[CCode (cname = "ngtcp2_crypto_aead", destroy_function = "")]
 	public struct CryptoAead {
 		public void * native_handle;
 		public size_t max_overhead;
 	}
 
-	[CCode (cname = "ngtcp2_crypto_cipher")]
+	[CCode (cname = "ngtcp2_crypto_cipher", destroy_function = "")]
 	public struct CryptoCipher {
 		public void * native_handle;
 	}
 
-	[CCode (cname = "ngtcp2_crypto_aead_ctx")]
+	[CCode (cname = "ngtcp2_crypto_aead_ctx", destroy_function = "")]
 	public struct CryptoAeadCtx {
 		public void * native_handle;
 	}
 
-	[CCode (cname = "ngtcp2_crypto_cipher_ctx")]
+	[CCode (cname = "ngtcp2_crypto_cipher_ctx", destroy_function = "")]
 	public struct CryptoCipherCtx {
 		public void * native_handle;
 	}
@@ -197,14 +202,7 @@ namespace NGTCP2 {
 	public struct Duration : uint64 {
 	}
 
-	[CCode (cname = "int", cprefix = "NGTCP2_CALLBACKS_", has_type_id = false)]
-	public enum CallbacksVersion {
-		[CCode (cname = "NGTCP2_CALLBACKS_VERSION")]
-		DEFAULT,
-		V1,
-	}
-
-	[CCode (cname = "ngtcp2_callbacks")]
+	[CCode (cname = "ngtcp2_callbacks", destroy_function = "")]
 	public struct Callbacks {
 		public ClientInitial? client_initial;
 		public RecvClientInitial? recv_client_initial;
@@ -347,14 +345,7 @@ namespace NGTCP2 {
 	[CCode (cname = "ngtcp2_tls_early_data_rejected", has_target = false)]
 	public delegate int TlsEarlyDataRejected (Connection conn, void * user_data);
 
-	[CCode (cname = "int", cprefix = "NGTCP2_SETTINGS_", has_type_id = false)]
-	public enum SettingsVersion {
-		[CCode (cname = "NGTCP2_SETTINGS_VERSION")]
-		DEFAULT,
-		V1,
-	}
-
-	[CCode (cname = "ngtcp2_callbacks")]
+	[CCode (cname = "ngtcp2_callbacks", destroy_function = "")]
 	public struct Settings {
 		public QlogWrite? qlog_write;
 		public CongestionControlAlgorithm cc_algo;
@@ -385,14 +376,7 @@ namespace NGTCP2 {
 	[CCode (cname = "ngtcp2_printf", has_target = false)]
 	public delegate void Printf (void * user_data, string format, ...);
 
-	[CCode (cname = "int", cprefix = "NGTCP2_TRANSPORT_PARAMS_", has_type_id = false)]
-	public enum TransportParamsVersion {
-		[CCode (cname = "NGTCP2_TRANSPORT_PARAMS_VERSION")]
-		DEFAULT,
-		V1,
-	}
-
-	[CCode (cname = "ngtcp2_transport_params")]
+	[CCode (cname = "ngtcp2_transport_params", destroy_function = "")]
 	public struct TransportParams {
 		public PreferredAddress preferred_addr;
 		public ConnectionID original_dcid;
@@ -422,7 +406,7 @@ namespace NGTCP2 {
 		public bool version_info_present;
 	}
 
-	[CCode (cname = "ngtcp2_mem")]
+	[CCode (cname = "ngtcp2_mem", destroy_function = "")]
 	public struct MemoryAllocator {
 		public void * user_data;
 		public Malloc malloc;
