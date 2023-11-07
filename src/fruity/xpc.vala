@@ -1016,6 +1016,11 @@ namespace Frida.Fruity.XPC {
 
 		private Socket socket;
 		private NGTcp2.Connection connection;
+		private NGTcp2.Crypto.ConnectionRef connection_ref;
+		private OpenSSL.SSLContext ssl_ctx;
+		private OpenSSL.SSL ssl;
+
+		private const string ALPN = "\x1bRemotePairingTunnelProtocol";
 
 		public static async TunnelConnection open (InetSocketAddress address,
 				Cancellable? cancellable = null) throws Error, IOError {
@@ -1032,6 +1037,23 @@ namespace Frida.Fruity.XPC {
 
 		private TunnelConnection (InetSocketAddress address) {
 			Object (address: address);
+		}
+
+		construct {
+			connection_ref.get_conn = conn_ref => {
+				TunnelConnection * self = conn_ref.user_data;
+				return self->connection;
+			};
+			connection_ref.user_data = this;
+
+			ssl_ctx = new OpenSSL.SSLContext (OpenSSL.SSLMethod.fetch_tls_client ());
+			NGTcp2.Crypto.Quictls.configure_client_context (ssl_ctx);
+
+			ssl = new OpenSSL.SSL (ssl_ctx);
+			ssl.set_app_data (&connection_ref);
+			ssl.set_connect_state ();
+			ssl.set_alpn_protos (ALPN.data);
+			ssl.set_quic_transport_version (OpenSSL.TLSExtensionType.quic_transport_parameters);
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -1068,6 +1090,10 @@ namespace Frida.Fruity.XPC {
 				decrypt = NGTcp2.Crypto.decrypt_cb,
 				hp_mask = NGTcp2.Crypto.hp_mask_cb,
 				recv_retry = NGTcp2.Crypto.recv_retry_cb,
+				extend_max_local_streams_bidi = (conn, max_streams, user_data) => {
+					TunnelConnection * self = user_data;
+					return self->on_extend_max_local_streams_bidi (max_streams);
+				},
 				rand = on_rand,
 				get_new_connection_id = on_get_new_connection_id,
 				update_key = NGTcp2.Crypto.update_key_cb,
@@ -1084,8 +1110,14 @@ namespace Frida.Fruity.XPC {
 
 			NGTcp2.Connection.make_client (out connection, dcid, scid, path, NGTcp2.ProtocolVersion.V1, callbacks, settings,
 				transport_params, null, this);
+			connection.set_tls_native_handle (ssl);
 
 			return true;
+		}
+
+		private int on_extend_max_local_streams_bidi (uint64 max_streams) {
+			printerr ("on_extend_max_local_streams_bidi(): TODO\n");
+			assert_not_reached ();
 		}
 
 		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
