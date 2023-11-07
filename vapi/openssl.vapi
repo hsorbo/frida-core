@@ -20,11 +20,6 @@ namespace OpenSSL {
 		public void set_quic_transport_version (int version);
 	}
 
-	[CCode (lower_case_cprefix = "TLSEXT_TYPE_")]
-	namespace TLSExtensionType {
-		public const int quic_transport_parameters;
-	}
-
 	[Compact]
 	[CCode (cname = "SSL_METHOD", cprefix = "SSL_METHOD_", free_function = "")]
 	public class SSLMethod {
@@ -41,6 +36,11 @@ namespace OpenSSL {
 		public static unowned SSLMethod fetch_dtls_server ();
 		[CCode (cname = "DTLS_client_method")]
 		public static unowned SSLMethod fetch_dtls_client ();
+	}
+
+	[CCode (lower_case_cprefix = "TLSEXT_TYPE_")]
+	namespace TLSExtensionType {
+		public const int quic_transport_parameters;
 	}
 
 	[CCode (cheader_filename = "openssl/evp.h")]
