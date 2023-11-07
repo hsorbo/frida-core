@@ -7,6 +7,8 @@ namespace NGTcp2 {
 		public static int make_client (out Connection conn, ConnectionID dcid, ConnectionID scid, Path path,
 			ProtocolVersion client_chosen_version, Callbacks callbacks, Settings settings, TransportParams params,
 			MemoryAllocator? mem, void * user_data);
+
+		public void set_tls_native_handle (void * tls_native_handle);
 	}
 
 	[CCode (cname = "ngtcp2_cid", destroy_function = "")]

@@ -1,5 +1,19 @@
 [CCode (cheader_filename = "ngtcp2/ngtcp2_crypto.h", lower_case_cprefix = "ngtcp2_crypto_", gir_namespace = "NGTcp2Crypto", gir_version = "1.0")]
 namespace NGTcp2.Crypto {
+	[CCode (cheader_filename = "ngtcp2/ngtcp2_crypto_quictls.h")]
+	namespace Quictls {
+		public int configure_client_context (OpenSSL.SSLContext ssl_ctx);
+	}
+
+	[CCode (cname = "ngtcp2_crypto_conn_ref", destroy_function = "")]
+	public struct ConnectionRef {
+		public GetConnection get_conn;
+		public void * user_data;
+	}
+
+	[CCode (cname = "ngtcp2_crypto_get_conn", has_target = false)]
+	public delegate unowned Connection GetConnection (ConnectionRef conn_ref);
+
 	public ClientInitial client_initial_cb;
 	public RecvCryptoData recv_crypto_data_cb;
 	public Encrypt encrypt_cb;

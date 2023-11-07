@@ -1,5 +1,49 @@
 [CCode (gir_namespace = "OpenSSL", gir_version = "1.0")]
 namespace OpenSSL {
+	[Compact]
+	[CCode (cname = "SSL_CTX", cprefix = "SSL_CTX_")]
+	public class SSLContext {
+		public SSLContext (SSLMethod meth);
+	}
+
+	[Compact]
+	[CCode (cname = "SSL", cprefix = "SSL_")]
+	public class SSL {
+		public SSL (SSLContext ctx);
+
+		public void set_app_data (void * data);
+
+		public void set_connect_state ();
+		public void set_accept_state ();
+
+		public int set_alpn_protos (uint8[] protos);
+
+		public void set_quic_transport_version (int version);
+	}
+
+	[CCode (lower_case_cprefix = "TLSEXT_TYPE_")]
+	namespace TLSExtensionType {
+		public const int quic_transport_parameters;
+	}
+
+	[Compact]
+	[CCode (cname = "SSL_METHOD", cprefix = "SSL_METHOD_", free_function = "")]
+	public class SSLMethod {
+		[CCode (cname = "TLS_method")]
+		public static unowned SSLMethod fetch_tls ();
+		[CCode (cname = "TLS_server_method")]
+		public static unowned SSLMethod fetch_tls_server ();
+		[CCode (cname = "TLS_client_method")]
+		public static unowned SSLMethod fetch_tls_client ();
+
+		[CCode (cname = "DTLS_method")]
+		public static unowned SSLMethod fetch_dtls ();
+		[CCode (cname = "DTLS_server_method")]
+		public static unowned SSLMethod fetch_dtls_server ();
+		[CCode (cname = "DTLS_client_method")]
+		public static unowned SSLMethod fetch_dtls_client ();
+	}
+
 	[CCode (cheader_filename = "openssl/evp.h")]
 	namespace Envelope {
 		[Compact]
