@@ -345,8 +345,11 @@ namespace NGTcp2 {
 	[CCode (cname = "ngtcp2_tls_early_data_rejected", has_target = false)]
 	public delegate int TlsEarlyDataRejected (Connection conn, void * user_data);
 
-	[CCode (cname = "ngtcp2_callbacks", destroy_function = "")]
+	[CCode (cname = "ngtcp2_settings", destroy_function = "")]
 	public struct Settings {
+		[CCode (cname = "ngtcp2_settings_default")]
+		public Settings.make_default ();
+
 		public QlogWrite? qlog_write;
 		public CongestionControlAlgorithm cc_algo;
 		public Timestamp initial_ts;
@@ -378,6 +381,9 @@ namespace NGTcp2 {
 
 	[CCode (cname = "ngtcp2_transport_params", destroy_function = "")]
 	public struct TransportParams {
+		[CCode (cname = "ngtcp2_transport_params_default")]
+		public TransportParams.make_default ();
+
 		public PreferredAddress preferred_addr;
 		public ConnectionID original_dcid;
 		public ConnectionID initial_scid;

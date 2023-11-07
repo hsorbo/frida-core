@@ -303,6 +303,7 @@ gmodule_dep = dependency('gmodule-2.0')
 gio_dep = dependency('gio-2.0')
 gee_dep = dependency('gee-0.8', default_options: gee_options)
 libngtcp2_dep = dependency('libngtcp2')
+ngtcp2_crypto_quictls_dep = dependency('ngtcp2_crypto_quictls')
 libnghttp2_dep = dependency('libnghttp2')
 json_glib_dep = dependency('json-glib-1.0', default_options: [
   'introspection=disabled',

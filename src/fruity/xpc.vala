@@ -1061,22 +1061,45 @@ namespace Frida.Fruity.XPC {
 				remote = NGTcp2.Address () { addr = remote_address },
 			};
 
-			NGTcp2.Callbacks callbacks = {
-				// TODO
+			var callbacks = NGTcp2.Callbacks () {
+				client_initial = NGTcp2.Crypto.client_initial_cb,
+				recv_crypto_data = NGTcp2.Crypto.recv_crypto_data_cb,
+				encrypt = NGTcp2.Crypto.encrypt_cb,
+				decrypt = NGTcp2.Crypto.decrypt_cb,
+				hp_mask = NGTcp2.Crypto.hp_mask_cb,
+				recv_retry = NGTcp2.Crypto.recv_retry_cb,
+				rand = on_rand,
+				get_new_connection_id = on_get_new_connection_id,
+				update_key = NGTcp2.Crypto.update_key_cb,
+				delete_crypto_aead_ctx = NGTcp2.Crypto.delete_crypto_aead_ctx_cb,
+				delete_crypto_cipher_ctx = NGTcp2.Crypto.delete_crypto_cipher_ctx_cb,
+				get_path_challenge_data = NGTcp2.Crypto.get_path_challenge_data_cb,
+				version_negotiation = NGTcp2.Crypto.version_negotiation_cb,
 			};
 
-			NGTcp2.Settings settings = {
-				// TODO
-			};
+			var settings = NGTcp2.Settings.make_default ();
+			settings.max_tx_udp_payload_size = 14000;
 
-			NGTcp2.TransportParams transport_params = {
-				// TODO
-			};
+			var transport_params = NGTcp2.TransportParams.make_default ();
 
 			NGTcp2.Connection.make_client (out connection, dcid, scid, path, NGTcp2.ProtocolVersion.V1, callbacks, settings,
 				transport_params, null, this);
 
 			return true;
+		}
+
+		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
+			OpenSSL.Rng.generate (dest);
+		}
+
+		private static int on_get_new_connection_id (NGTcp2.Connection conn, NGTcp2.ConnectionID cid, uint8[] token, size_t cidlen,
+				void * user_data) {
+			OpenSSL.Rng.generate (cid.data[:cidlen]);
+			cid.datalen = cidlen;
+
+			OpenSSL.Rng.generate (token[:NGTcp2.STATELESS_RESET_TOKENLEN]);
+
+			return 0;
 		}
 
 		private static uint8[] address_to_native (SocketAddress address) throws GLib.Error {

@@ -538,7 +538,7 @@ subdir('compiler')
 core_sources = base_sources + backend_sources + compiler_sources
 
 internal_libs = [base, pipe] + backend_libs
-internal_deps = [base_dep, pipe_dep, libngtcp2_dep, libnghttp2_dep]
+internal_deps = [base_dep, pipe_dep, libngtcp2_dep, ngtcp2_crypto_quictls_dep, libnghttp2_dep]
 
 if host_os_family == 'windows'
   gio_platform_vala_args = ['--pkg=gio-windows-2.0']
