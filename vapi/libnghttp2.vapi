@@ -3,6 +3,9 @@ namespace NGHttp2 {
 	[Compact]
 	[CCode (cname = "nghttp2_session", cprefix = "nghttp2_session_", free_function = "nghttp2_session_del")]
 	public class Session {
+		[CCode (cname = "nghttp2_session_client_new2")]
+		public static int make_client (out Session session, SessionCallbacks callbacks, void * user_data, Option? option = null);
+
 		[CCode (cname = "nghttp2_submit_settings")]
 		public int submit_settings (uint8 flags, SettingsEntry[] entries);
 
@@ -29,13 +32,6 @@ namespace NGHttp2 {
 		public bool want_write ();
 
 		public int consume_connection (size_t size);
-	}
-
-	[Compact]
-	[CCode (cname = "nghttp2_session", cprefix = "nghttp2_session_", free_function = "nghttp2_session_del")]
-	public class ClientSession : Session {
-		[CCode (cname = "nghttp2_session_client_new2")]
-		public static int make (out ClientSession session, SessionCallbacks callbacks, void * user_data, Option? option = null);
 	}
 
 	[Compact]
