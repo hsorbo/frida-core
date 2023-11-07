@@ -488,7 +488,7 @@ namespace Frida.Fruity.XPC {
 							.set_member_name ("createListener")
 							.begin_object ()
 								.set_member_name ("transportProtocolType")
-								.add_string_value ("udp")
+								.add_string_value ("quic")
 								.set_member_name ("key")
 								.add_string_value ("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvxGoUUKGs9iwCciGSLXugDmRsW7vGowuIIc6LgTmCAPX4HNhRmvmB2j7Thb8vc0kFNTr/qbfj1LB/kgjAe6LLHaJtlUZB7x50bldnAwcYHXaugzyilTyolE81d1pnjBv+WbpvErTR5pbn8quTfeN3sStLqr/BJZ2Uqxy/NLTxjINHoO3UEsxQSQ1b2dRzQ2dofIooNGT42Ljdj/SPc9HOpVdv7FzqtMnHAjCuhjOopFFtH8FUXRMYpk1YeaYxVn9r7FIj2f/LDSL7aAHbgoKMd6dUM8ZZRT+vuzAl6XRNZG77h1CgxwjxsrZ1XGdikBneB8dxiDjfO/l07b20G4eiwIDAQAB")
 							.end_object ()
@@ -498,6 +498,8 @@ namespace Frida.Fruity.XPC {
 				.get_root (), false);
 
 			string response = yield request_encrypted (request, cancellable);
+
+			printerr ("Got: %s\n", response);
 
 			Json.Reader reader;
 			try {
@@ -518,43 +520,48 @@ namespace Frida.Fruity.XPC {
 			uint16 port = (uint16) reader.get_int_value ();
 			reader.end_member ();
 
-			reader.read_member ("udpPort");
-			uint16 udp_port = (uint16) reader.get_int_value ();
-			reader.end_member ();
-
-			reader.read_member ("udpPSK");
-			string? udp_psk = reader.get_string_value ();
-			reader.end_member ();
-
 			GLib.Error? error = reader.get_error ();
 			if (error != null)
 				throw new Error.PROTOCOL ("Invalid response: %s", error.message);
 
+			NGTCP2.Connection connection;
+			NGTCP2.Connection.make_client (out connection);
 			printerr ("\n=== Yay:\n");
 			printerr (@"device_pubkey: \"$device_pubkey\"\n");
 			printerr (@"port: $port\n");
-			printerr (@"udp_port: $udp_port\n");
-			printerr (@"udp_psk: \"$udp_psk\"\n");
 
-			try {
-				var socket = new Socket (IPV6, DATAGRAM, UDP);
-				socket.connect (new InetSocketAddress.from_string (device_address, udp_port), cancellable);
+			for (uint i = 0; i != 3; i++) {
+				try {
+					var client = new SocketClient ();
+					printerr (">>> connect_async() [attempt=%u]\n", i + 1);
+					SocketConnection connection = yield client.connect_async (
+						new InetSocketAddress.from_string (device_address, port),
+						cancellable);
+					printerr ("<<< connect_async()\n");
 
-				var tc = DtlsClientConnection.new (socket, null);
-				tc.set_database (null);
+					var tc = TlsClientConnection.new (connection, null);
+					tc.set_database (null);
 
-				tc.accept_certificate.connect ((peer_cert, errors) => {
-					printerr ("accept_certificate() yes!\n");
-					return true;
-				});
+					tc.accept_certificate.connect ((peer_cert, errors) => {
+						printerr ("accept_certificate() yes!\n");
+						return true;
+					});
 
-				printerr (">>> handshake_async()\n");
-				yield tc.handshake_async (Priority.DEFAULT, cancellable);
-				printerr ("<<< handshake_async()\n");
+					printerr (">>> handshake_async()\n");
+					yield tc.handshake_async (Priority.DEFAULT, cancellable);
+					printerr ("<<< handshake_async()\n");
 
-				printerr ("Handshake successful!\n");
-			} catch (GLib.Error e) {
-				throw new Error.TRANSPORT ("%s", e.message);
+					printerr ("Handshake successful!\n");
+					break;
+				} catch (GLib.Error e) {
+					printerr ("Nope: %s\n", e.message);
+
+					var source = new TimeoutSource.seconds (1);
+					source.set_callback (create_listener.callback);
+					source.attach (MainContext.get_thread_default ());
+					yield;
+					printerr ("\nTrying again...\n\n");
+				}
 			}
 		}
 
@@ -1388,7 +1395,7 @@ namespace Frida.Fruity.XPC {
 			// option.set_no_http_semantics (true);
 			option.set_no_closed_streams (true);
 
-			NGHttp2.ClientSession.make (out session, callbacks, this, option);
+			NGHttp2.Session.make_client (out session, callbacks, this, option);
 		}
 
 		public void activate () {
