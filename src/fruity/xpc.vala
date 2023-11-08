@@ -3,6 +3,7 @@ namespace Frida.Fruity.XPC {
 	using Darwin.DNSSD;
 	using Darwin.GCD;
 	using Darwin.Net;
+	using OpenSSL;
 	using OpenSSL.Envelope;
 
 	private const string PAIRING_REGTYPE = "_remotepairing._tcp";
@@ -480,6 +481,8 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public async void create_listener (string device_address, Cancellable? cancellable = null) throws Error, IOError {
+			Key key = make_rsa_keypair ();
+
 			string request = Json.to_string (
 				new Json.Builder ()
 				.begin_object ()
@@ -492,7 +495,7 @@ namespace Frida.Fruity.XPC {
 								.set_member_name ("transportProtocolType")
 								.add_string_value ("quic")
 								.set_member_name ("key")
-								.add_string_value ("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvxGoUUKGs9iwCciGSLXugDmRsW7vGowuIIc6LgTmCAPX4HNhRmvmB2j7Thb8vc0kFNTr/qbfj1LB/kgjAe6LLHaJtlUZB7x50bldnAwcYHXaugzyilTyolE81d1pnjBv+WbpvErTR5pbn8quTfeN3sStLqr/BJZ2Uqxy/NLTxjINHoO3UEsxQSQ1b2dRzQ2dofIooNGT42Ljdj/SPc9HOpVdv7FzqtMnHAjCuhjOopFFtH8FUXRMYpk1YeaYxVn9r7FIj2f/LDSL7aAHbgoKMd6dUM8ZZRT+vuzAl6XRNZG77h1CgxwjxsrZ1XGdikBneB8dxiDjfO/l07b20G4eiwIDAQAB")
+								.add_string_value (Base64.encode (get_raw_public_key (key).get_data ()))
 							.end_object ()
 						.end_object ()
 					.end_object ()
@@ -531,7 +534,7 @@ namespace Frida.Fruity.XPC {
 			printerr (@"port: $port\n");
 
 			tunnel_connection_todo =
-				yield TunnelConnection.open (new InetSocketAddress.from_string (device_address, port), cancellable);
+				yield TunnelConnection.open (new InetSocketAddress.from_string (device_address, port)/*, key*/, cancellable);
 		}
 
 		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
@@ -858,6 +861,163 @@ namespace Frida.Fruity.XPC {
 			} catch (Error e) {
 			}
 		}
+
+		private static Key make_x25519_keypair () {
+			var ctx = new KeyContext.for_key_type (X25519);
+			ctx.keygen_init ();
+
+			Key? keypair = null;
+			ctx.keygen (ref keypair);
+
+			return keypair;
+		}
+
+		private static Key make_rsa_keypair () {
+			var cert = new X509 ();
+			cert.get_serial_number ().set_uint64 (1);
+			cert.get_not_before ().adjust (0);
+			cert.get_not_after ().adjust (15780000);
+
+			unowned X509.Name name = cert.get_subject_name ();
+			name.add_entry_by_txt ("C", ASCII, "CA".data);
+			name.add_entry_by_txt ("O", ASCII, "Frida".data);
+			name.add_entry_by_txt ("CN", ASCII, "lolcathost".data);
+			cert.set_issuer_name (name);
+
+			var kc = new KeyContext.for_key_type (RSA);
+			kc.keygen_init ();
+
+			Key? keypair = null;
+			kc.keygen (ref keypair);
+
+			cert.set_pubkey (keypair);
+
+			var mc = new MessageDigestContext ();
+			mc.digest_sign_init (null, null, null, keypair);
+			cert.sign_ctx (mc);
+
+			return keypair;
+		}
+
+		private static Bytes derive_shared_key (Key local_keypair, Key remote_pubkey) {
+			var ctx = new KeyContext.for_key (local_keypair);
+			ctx.derive_init ();
+			ctx.derive_set_peer (remote_pubkey);
+
+			size_t size = 0;
+			ctx.derive (null, ref size);
+
+			var shared_key = new uint8[size];
+			ctx.derive (shared_key, ref size);
+
+			return new Bytes.take ((owned) shared_key);
+		}
+
+		private static Bytes derive_chacha_key (Bytes shared_key, string info, string? salt = null) {
+			var kdf = KeyDerivationFunction.fetch (null, KeyDerivationAlgorithm.HKDF);
+
+			var kdf_ctx = new KeyDerivationContext (kdf);
+
+			size_t return_size = OpenSSL.ParamReturnSize.UNMODIFIED;
+
+			OpenSSL.Param kdf_params[] = {
+				{ KeyDerivationParameter.DIGEST, UTF8_STRING, OpenSSL.ShortName.sha512.data, return_size },
+				{ KeyDerivationParameter.KEY, OCTET_STRING, shared_key.get_data (), return_size },
+				{ KeyDerivationParameter.INFO, OCTET_STRING, info.data, return_size },
+				{ (salt != null) ? KeyDerivationParameter.SALT : null, OCTET_STRING, (salt != null) ? salt.data : null,
+					return_size },
+				{ null, INTEGER, null, return_size },
+			};
+
+			var derived_key = new uint8[32];
+			kdf_ctx.derive (derived_key, kdf_params);
+
+			return new Bytes.take ((owned) derived_key);
+		}
+
+		private static Bytes compute_message_signature (Bytes message, Key key) {
+			var ctx = new MessageDigestContext ();
+			ctx.digest_sign_init (null, null, null, key);
+
+			unowned uint8[] data = message.get_data ();
+
+			size_t size = 0;
+			ctx.digest_sign (null, ref size, data);
+
+			var signature = new uint8[size];
+			ctx.digest_sign (signature, ref size, data);
+
+			return new Bytes.take ((owned) signature);
+		}
+
+		private class ChaCha20Poly1305 {
+			private Bytes key;
+
+			private Cipher cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
+			private CipherContext? cached_ctx;
+
+			private const size_t TAG_SIZE = 16;
+
+			public ChaCha20Poly1305 (Bytes key) {
+				this.key = key;
+			}
+
+			public Bytes encrypt (Bytes iv, Bytes message) {
+				size_t cleartext_size = message.get_size ();
+				var buf = new uint8[cleartext_size + TAG_SIZE];
+
+				unowned CipherContext ctx = get_context ();
+				cached_ctx.encrypt_init (cipher, key.get_data (), iv.get_data ());
+
+				int size = buf.length;
+				ctx.encrypt_update (buf, ref size, message.get_data ());
+
+				int extra_size = buf.length - size;
+				ctx.encrypt_final (buf[size:], ref extra_size);
+				assert (extra_size == 0);
+
+				ctx.ctrl (AEAD_GET_TAG, (int) TAG_SIZE, (void *) buf[size:]);
+
+				return new Bytes.take ((owned) buf);
+			}
+
+			public Bytes decrypt (Bytes iv, Bytes message) throws Error {
+				size_t message_size = message.get_size ();
+				if (message_size < 1 + TAG_SIZE)
+					throw new Error.PROTOCOL ("Encrypted message is too short");
+				unowned uint8[] message_data = message.get_data ();
+
+				var buf = new uint8[message_size];
+
+				unowned CipherContext ctx = get_context ();
+				cached_ctx.decrypt_init (cipher, key.get_data (), iv.get_data ());
+
+				int size = (int) message_size;
+				int res = ctx.decrypt_update (buf, ref size, message_data);
+				if (res != 1)
+					throw new Error.PROTOCOL ("Failed to decrypt: %d", res);
+
+				int extra_size = buf.length - size;
+				res = ctx.decrypt_final (buf[size:], ref extra_size);
+				if (res != 1)
+					throw new Error.PROTOCOL ("Failed to decrypt: %d", res);
+				assert (extra_size == 0);
+
+				size_t cleartext_size = message_size - TAG_SIZE;
+				buf[cleartext_size] = 0;
+				buf.length = (int) cleartext_size;
+
+				return new Bytes.take ((owned) buf);
+			}
+
+			private unowned CipherContext get_context () {
+				if (cached_ctx == null)
+					cached_ctx = new CipherContext ();
+				else
+					cached_ctx.reset ();
+				return cached_ctx;
+			}
+		}
 	}
 
 	public class DeviceInfo {
@@ -1014,6 +1174,13 @@ namespace Frida.Fruity.XPC {
 			construct;
 		}
 
+		/*
+		public Key key {
+			get;
+			construct;
+		}
+		*/
+
 		private Socket socket;
 		private uint8[] raw_local_address;
 		private NGTcp2.Connection connection;
@@ -1033,9 +1200,9 @@ namespace Frida.Fruity.XPC {
 		private const string ALPN = "\x1bRemotePairingTunnelProtocol";
 		private const size_t MAX_TX_UDP_PAYLOAD_SIZE = 14000;
 
-		public static async TunnelConnection open (InetSocketAddress address,
+		public static async TunnelConnection open (InetSocketAddress address, /*Key key,*/
 				Cancellable? cancellable = null) throws Error, IOError {
-			var connection = new TunnelConnection (address);
+			var connection = new TunnelConnection (address/*, key*/);
 
 			try {
 				yield connection.init_async (Priority.DEFAULT, cancellable);
@@ -1046,8 +1213,8 @@ namespace Frida.Fruity.XPC {
 			return connection;
 		}
 
-		private TunnelConnection (InetSocketAddress address) {
-			Object (address: address);
+		private TunnelConnection (InetSocketAddress address/*, Key key*/) {
+			Object (address: address/*, key: key*/);
 		}
 
 		construct {
@@ -2884,136 +3051,6 @@ namespace Frida.Fruity.XPC {
 		key.get_raw_public_key (pubkey, ref size);
 
 		return new Bytes.take ((owned) pubkey);
-	}
-
-	private Key make_x25519_keypair () {
-		var ctx = new KeyContext.for_key_type (X25519);
-		ctx.keygen_init ();
-
-		Key? keypair = null;
-		ctx.keygen (ref keypair);
-
-		return keypair;
-	}
-
-	private Bytes derive_shared_key (Key local_keypair, Key remote_pubkey) {
-		var ctx = new KeyContext.for_key (local_keypair);
-		ctx.derive_init ();
-		ctx.derive_set_peer (remote_pubkey);
-
-		size_t size = 0;
-		ctx.derive (null, ref size);
-
-		var shared_key = new uint8[size];
-		ctx.derive (shared_key, ref size);
-
-		return new Bytes.take ((owned) shared_key);
-	}
-
-	private Bytes derive_chacha_key (Bytes shared_key, string info, string? salt = null) {
-		var kdf = KeyDerivationFunction.fetch (null, KeyDerivationAlgorithm.HKDF);
-
-		var kdf_ctx = new KeyDerivationContext (kdf);
-
-		size_t return_size = OpenSSL.ParamReturnSize.UNMODIFIED;
-
-		OpenSSL.Param kdf_params[] = {
-			{ KeyDerivationParameter.DIGEST, UTF8_STRING, OpenSSL.ShortName.sha512.data, return_size },
-			{ KeyDerivationParameter.KEY, OCTET_STRING, shared_key.get_data (), return_size },
-			{ KeyDerivationParameter.INFO, OCTET_STRING, info.data, return_size },
-			{ (salt != null) ? KeyDerivationParameter.SALT : null, OCTET_STRING, (salt != null) ? salt.data : null,
-				return_size },
-			{ null, INTEGER, null, return_size },
-		};
-
-		var derived_key = new uint8[32];
-		kdf_ctx.derive (derived_key, kdf_params);
-
-		return new Bytes.take ((owned) derived_key);
-	}
-
-	private Bytes compute_message_signature (Bytes message, Key key) {
-		var ctx = new MessageDigestContext ();
-		ctx.digest_sign_init (null, null, null, key);
-
-		unowned uint8[] data = message.get_data ();
-
-		size_t size = 0;
-		ctx.digest_sign (null, ref size, data);
-
-		var signature = new uint8[size];
-		ctx.digest_sign (signature, ref size, data);
-
-		return new Bytes.take ((owned) signature);
-	}
-
-	private class ChaCha20Poly1305 {
-		private Bytes key;
-
-		private Cipher cipher = Cipher.fetch (null, OpenSSL.ShortName.chacha20_poly1305);
-		private CipherContext? cached_ctx;
-
-		private const size_t TAG_SIZE = 16;
-
-		public ChaCha20Poly1305 (Bytes key) {
-			this.key = key;
-		}
-
-		public Bytes encrypt (Bytes iv, Bytes message) {
-			size_t cleartext_size = message.get_size ();
-			var buf = new uint8[cleartext_size + TAG_SIZE];
-
-			unowned CipherContext ctx = get_context ();
-			cached_ctx.encrypt_init (cipher, key.get_data (), iv.get_data ());
-
-			int size = buf.length;
-			ctx.encrypt_update (buf, ref size, message.get_data ());
-
-			int extra_size = buf.length - size;
-			ctx.encrypt_final (buf[size:], ref extra_size);
-			assert (extra_size == 0);
-
-			ctx.ctrl (AEAD_GET_TAG, (int) TAG_SIZE, (void *) buf[size:]);
-
-			return new Bytes.take ((owned) buf);
-		}
-
-		public Bytes decrypt (Bytes iv, Bytes message) throws Error {
-			size_t message_size = message.get_size ();
-			if (message_size < 1 + TAG_SIZE)
-				throw new Error.PROTOCOL ("Encrypted message is too short");
-			unowned uint8[] message_data = message.get_data ();
-
-			var buf = new uint8[message_size];
-
-			unowned CipherContext ctx = get_context ();
-			cached_ctx.decrypt_init (cipher, key.get_data (), iv.get_data ());
-
-			int size = (int) message_size;
-			int res = ctx.decrypt_update (buf, ref size, message_data);
-			if (res != 1)
-				throw new Error.PROTOCOL ("Failed to decrypt: %d", res);
-
-			int extra_size = buf.length - size;
-			res = ctx.decrypt_final (buf[size:], ref extra_size);
-			if (res != 1)
-				throw new Error.PROTOCOL ("Failed to decrypt: %d", res);
-			assert (extra_size == 0);
-
-			size_t cleartext_size = message_size - TAG_SIZE;
-			buf[cleartext_size] = 0;
-			buf.length = (int) cleartext_size;
-
-			return new Bytes.take ((owned) buf);
-		}
-
-		private unowned CipherContext get_context () {
-			if (cached_ctx == null)
-				cached_ctx = new CipherContext ();
-			else
-				cached_ctx.reset ();
-			return cached_ctx;
-		}
 	}
 
 	// https://gist.github.com/phako/96b36b5070beaf7eee27

@@ -44,6 +44,57 @@ namespace OpenSSL {
 		public const int quic_transport_parameters;
 	}
 
+	[Compact]
+	[CCode (cname = "X509", cprefix = "X509_")]
+	public class X509 {
+		public X509 ();
+
+		[CCode (cname = "X509_get_serialNumber")]
+		public unowned ASN1.Integer get_serial_number ();
+
+		[CCode (cname = "X509_getm_notBefore")]
+		public unowned ASN1.Time get_not_before ();
+		[CCode (cname = "X509_getm_notAfter")]
+		public unowned ASN1.Time get_not_after ();
+
+		public unowned Name get_subject_name ();
+		public int set_issuer_name (Name name);
+
+		public int set_pubkey (Envelope.Key key);
+
+		public int sign_ctx (Envelope.MessageDigestContext ctx);
+
+		[Compact]
+		[CCode (cname = "X509_NAME", cprefix = "X509_NAME_")]
+		public class Name {
+			public int add_entry_by_txt (string field, ASN1.MultiByteStringType type, uint8[] bytes, int loc = -1, int set = 0);
+		}
+	}
+
+	[CCode (cheader_filename = "openssl/asn1.h")]
+	namespace ASN1 {
+		[Compact]
+		[CCode (cname = "ASN1_INTEGER", cprefix = "ASN1_INTEGER_")]
+		public class Integer {
+			public int set_int64 (int64 v);
+			public int set_uint64 (uint64 v);
+		}
+
+		[Compact]
+		[CCode (cname = "ASN1_TIME", cprefix = "ASN1_TIME_")]
+		public class Time {
+			[CCode (cname = "X509_gmtime_adj")]
+			public unowned Time adjust (long delta);
+		}
+
+		[CCode (cname = "int", cprefix = "MBSTRING_", has_type_id = false)]
+		public enum MultiByteStringType {
+			UTF8,
+			[CCode (cname = "MBSTRING_ASC")]
+			ASCII,
+		}
+	}
+
 	[CCode (cheader_filename = "openssl/evp.h")]
 	namespace Envelope {
 		[Compact]
