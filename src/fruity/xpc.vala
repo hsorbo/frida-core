@@ -1008,19 +1008,30 @@ namespace Frida.Fruity.XPC {
 		SIGNATURE	= 10,
 	}
 
-	private class TunnelConnection : Object, AsyncInitable {
+	private sealed class TunnelConnection : Object, AsyncInitable {
 		public InetSocketAddress address {
 			get;
 			construct;
 		}
 
 		private Socket socket;
+		private uint8[] raw_local_address;
 		private NGTcp2.Connection connection;
 		private NGTcp2.Crypto.ConnectionRef connection_ref;
 		private OpenSSL.SSLContext ssl_ctx;
 		private OpenSSL.SSL ssl;
 
+		private SocketSource? rx_source;
+		private uint8[] rx_buf = new uint8[MAX_TX_UDP_PAYLOAD_SIZE];
+		private uint8[] tx_buf = new uint8[MAX_TX_UDP_PAYLOAD_SIZE];
+		private Source? expiry_timer = null;
+
+		private int64 control_stream_id = -1;
+
+		private Cancellable io_cancellable = new Cancellable ();
+
 		private const string ALPN = "\x1bRemotePairingTunnelProtocol";
+		private const size_t MAX_TX_UDP_PAYLOAD_SIZE = 14000;
 
 		public static async TunnelConnection open (InetSocketAddress address,
 				Cancellable? cancellable = null) throws Error, IOError {
@@ -1057,30 +1068,23 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			uint8[] local_address, remote_address;
+			uint8[] raw_remote_address;
 			try {
 				socket = new Socket (IPV6, DATAGRAM, UDP);
 				socket.connect (address, cancellable);
 
-				local_address = address_to_native (socket.get_local_address ());
-				remote_address = address_to_native (address);
+				raw_local_address = address_to_native (socket.get_local_address ());
+				raw_remote_address = address_to_native (address);
 			} catch (GLib.Error e) {
 				throw new Error.TRANSPORT ("%s", e.message);
 			}
 
-			var dcid = NGTcp2.ConnectionID () {
-				datalen = NGTcp2.MIN_INITIAL_DCIDLEN,
-			};
-			OpenSSL.Rng.generate (dcid.data[:dcid.datalen]);
+			var dcid = make_connection_id (NGTcp2.MIN_INITIAL_DCIDLEN);
+			var scid = make_connection_id (8);
 
-			var scid = NGTcp2.ConnectionID () {
-				datalen = 8,
-			};
-			OpenSSL.Rng.generate (scid.data[:scid.datalen]);
-
-			NGTcp2.Path path = NGTcp2.Path () {
-				local = NGTcp2.Address () { addr = local_address },
-				remote = NGTcp2.Address () { addr = remote_address },
+			var path = NGTcp2.Path () {
+				local = NGTcp2.Address () { addr = raw_local_address },
+				remote = NGTcp2.Address () { addr = raw_remote_address },
 			};
 
 			var callbacks = NGTcp2.Callbacks () {
@@ -1104,34 +1108,175 @@ namespace Frida.Fruity.XPC {
 			};
 
 			var settings = NGTcp2.Settings.make_default ();
-			settings.max_tx_udp_payload_size = 14000;
+			settings.initial_ts = make_timestamp ();
+			settings.log_printf = (NGTcp2.Printf) on_log_printf;
+			settings.max_tx_udp_payload_size = MAX_TX_UDP_PAYLOAD_SIZE;
+			settings.handshake_timeout = 5ULL * NGTcp2.SECONDS;
 
 			var transport_params = NGTcp2.TransportParams.make_default ();
+			transport_params.initial_max_stream_data_bidi_local = 128 * 1024;
+			transport_params.initial_max_data = 1024 * 1024;
 
-			NGTcp2.Connection.make_client (out connection, dcid, scid, path, NGTcp2.ProtocolVersion.V1, callbacks, settings,
-				transport_params, null, this);
+			NGTcp2.Connection.make_client (out connection, dcid, scid, path, NGTcp2.ProtocolVersion.V1, callbacks,
+				settings, transport_params, null, this);
 			connection.set_tls_native_handle (ssl);
+
+			rx_source = socket.create_source (IOCondition.IN, io_cancellable);
+			rx_source.set_callback (on_socket_readable);
+			rx_source.attach (MainContext.get_thread_default ());
+
+			process_pending_writes ();
 
 			return true;
 		}
 
+		public void cancel () {
+			io_cancellable.cancel ();
+
+			if (rx_source != null) {
+				rx_source.destroy ();
+				rx_source = null;
+			}
+
+			if (expiry_timer != null) {
+				expiry_timer.destroy ();
+				expiry_timer = null;
+			}
+		}
+
+		private bool on_socket_readable (DatagramBased datagram_based, IOCondition condition) {
+			printerr ("on_socket_readable()\n");
+
+			try {
+				SocketAddress remote_address;
+				ssize_t n = socket.receive_from (out remote_address, rx_buf, io_cancellable);
+
+				uint8[] raw_remote_address = address_to_native (remote_address);
+
+				var path = NGTcp2.Path () {
+					local = NGTcp2.Address () { addr = raw_local_address },
+					remote = NGTcp2.Address () { addr = raw_remote_address },
+				};
+
+				unowned uint8[] data = rx_buf[:n];
+
+				int res = connection.read_packet (path, null, data, make_timestamp ());
+				if (res != 0) {
+					printerr ("read_packet() failed: %s\n", NGTcp2.strerror (res));
+				}
+			} catch (GLib.Error e) {
+				return Source.REMOVE;
+			}
+
+			return Source.CONTINUE;
+		}
+
+		private void process_pending_writes () {
+			var pi = NGTcp2.PacketInfo ();
+			while (true) {
+				ssize_t datalen = 0;
+				int64 stream_id = -1;
+				uint8[]? data = null;
+				var ts = make_timestamp ();
+				ssize_t n = connection.write_stream (null, &pi, tx_buf, &datalen, NGTcp2.WriteStreamFlags.NONE, stream_id,
+					data, ts);
+				printerr ("write_stream() => %zd\n", n);
+				if (n < 0) {
+					if (n == NGTcp2.ErrorCode.WRITE_MORE) {
+						// TODO: advance tx cursor
+						printerr ("write_stream() TODO: advance tx cursor\n");
+						continue;
+					} else {
+						printerr ("write_stream() TODO: handle error %s\n", NGTcp2.strerror ((int) n));
+						// TODO
+						break;
+					}
+				}
+
+				if (n == 0)
+					break;
+
+				if (datalen > 0) {
+					// TODO: advance tx cursor
+					printerr ("write_stream() TODO: advance tx cursor\n");
+				}
+
+				try {
+					ssize_t num_bytes_written = socket.send (tx_buf[:n], io_cancellable);
+					printerr ("write_stream() wrote %zd bytes\n", num_bytes_written);
+				} catch (GLib.Error e) {
+					printerr ("write_stream() send() failed: %s\n", e.message);
+					continue;
+				}
+			}
+
+			if (expiry_timer != null) {
+				expiry_timer.destroy ();
+				expiry_timer = null;
+			}
+
+			NGTcp2.Timestamp expiry = connection.get_expiry ();
+			if (expiry == uint64.MAX)
+				return;
+
+			NGTcp2.Timestamp now = make_timestamp ();
+
+			uint delta_msec;
+			if (expiry > now) {
+				uint64 delta_nsec = expiry - now;
+				delta_msec = (uint) (delta_nsec / 1000000ULL);
+			} else {
+				delta_msec = 1;
+			}
+
+			var source = new TimeoutSource (delta_msec);
+			source.set_callback (on_expiry);
+			source.attach (MainContext.get_thread_default ());
+			expiry_timer = source;
+		}
+
+		private bool on_expiry () {
+			int res = connection.handle_expiry (make_timestamp ());
+			if (res != 0) {
+				printerr ("handle_expiry() failed: %s\n", NGTcp2.strerror (res));
+				return Source.REMOVE;
+			}
+
+			process_pending_writes ();
+
+			return Source.REMOVE;
+		}
+
 		private int on_extend_max_local_streams_bidi (uint64 max_streams) {
-			printerr ("on_extend_max_local_streams_bidi(): TODO\n");
-			assert_not_reached ();
+			if (control_stream_id != -1) {
+				printerr ("on_extend_max_local_streams_bidi(): no-op\n");
+				return 0;
+			}
+
+			connection.open_bidi_stream (out control_stream_id, null);
+			printerr ("on_extend_max_local_streams_bidi(): created control_stream_id=%" + int64.FORMAT_MODIFIER + "d\n",
+				control_stream_id);
+
+			return 0;
 		}
 
 		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
 			OpenSSL.Rng.generate (dest);
 		}
 
-		private static int on_get_new_connection_id (NGTcp2.Connection conn, NGTcp2.ConnectionID cid, uint8[] token, size_t cidlen,
-				void * user_data) {
-			OpenSSL.Rng.generate (cid.data[:cidlen]);
-			cid.datalen = cidlen;
+		private static int on_get_new_connection_id (NGTcp2.Connection conn, out NGTcp2.ConnectionID cid, uint8[] token,
+				size_t cidlen, void * user_data) {
+			cid = make_connection_id (cidlen);
 
 			OpenSSL.Rng.generate (token[:NGTcp2.STATELESS_RESET_TOKENLEN]);
 
 			return 0;
+		}
+
+		private static void on_log_printf (void * user_data, string format, ...) {
+			var args = va_list ();
+			string message = format.vprintf (args);
+			printerr ("on_log_printf(): %s\n", message);
 		}
 
 		private static uint8[] address_to_native (SocketAddress address) throws GLib.Error {
@@ -1139,6 +1284,21 @@ namespace Frida.Fruity.XPC {
 			var buf = new uint8[size];
 			address.to_native (buf, size);
 			return buf;
+		}
+
+		private static NGTcp2.ConnectionID make_connection_id (size_t len) {
+			var cid = NGTcp2.ConnectionID () {
+				datalen = len,
+			};
+
+			NGTcp2.ConnectionID * mutable_cid = &cid;
+			OpenSSL.Rng.generate (mutable_cid->data[:len]);
+
+			return cid;
+		}
+
+		private static NGTcp2.Timestamp make_timestamp () {
+			return get_monotonic_time () * NGTcp2.MICROSECONDS;
 		}
 	}
 
