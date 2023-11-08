@@ -1,4 +1,4 @@
-[CCode (cheader_filename = "ngtcp2/ngtcp2.h", gir_namespace = "NGTcp2", gir_version = "1.0")]
+[CCode (cheader_filename = "ngtcp2/ngtcp2.h", lower_case_cprefix = "ngtcp2_", gir_namespace = "NGTcp2", gir_version = "1.0")]
 namespace NGTcp2 {
 	[Compact]
 	[CCode (cname = "ngtcp2_conn", cprefix = "ngtcp2_conn_", free_function = "ngtcp2_conn_del")]
@@ -9,6 +9,66 @@ namespace NGTcp2 {
 			MemoryAllocator? mem, void * user_data);
 
 		public void set_tls_native_handle (void * tls_native_handle);
+
+		public Timestamp get_expiry ();
+		public int handle_expiry (Timestamp ts);
+
+		[CCode (cname = "ngtcp2_conn_read_pkt")]
+		public int read_packet (Path path, PacketInfo * pi, uint8[] pkt, Timestamp ts);
+
+		public int open_bidi_stream (out int64 stream_id, void * stream_user_data);
+
+		public ssize_t write_stream (Path * path, PacketInfo * pi, uint8[] dest, ssize_t * pdatalen, WriteStreamFlags flags,
+			int64 stream_id, uint8[]? data, Timestamp ts);
+		public ssize_t writev_stream (Path * path, PacketInfo * pi, uint8[] dest, ssize_t * pdatalen, WriteStreamFlags flags,
+			int64 stream_id, IOVector[] datav, Timestamp ts);
+	}
+
+	public unowned string strerror (int liberr);
+
+	[CCode (cname = "int", cprefix = "NGTCP2_ERR_", has_type_id = false)]
+	public enum ErrorCode {
+		INVALID_ARGUMENT,
+		NOBUF,
+		PROTO,
+		INVALID_STATE,
+		ACK_FRAME,
+		STREAM_ID_BLOCKED,
+		STREAM_IN_USE,
+		STREAM_DATA_BLOCKED,
+		FLOW_CONTROL,
+		CONNECTION_ID_LIMIT,
+		STREAM_LIMIT,
+		FINAL_SIZE,
+		CRYPTO,
+		PKT_NUM_EXHAUSTED,
+		REQUIRED_TRANSPORT_PARAM,
+		MALFORMED_TRANSPORT_PARAM,
+		FRAME_ENCODING,
+		DECRYPT,
+		STREAM_SHUT_WR,
+		STREAM_NOT_FOUND,
+		STREAM_STATE,
+		RECV_VERSION_NEGOTIATION,
+		CLOSING,
+		DRAINING,
+		TRANSPORT_PARAM,
+		DISCARD_PKT,
+		CONN_ID_BLOCKED,
+		INTERNAL,
+		CRYPTO_BUFFER_EXCEEDED,
+		WRITE_MORE,
+		RETRY,
+		DROP_CONN,
+		AEAD_LIMIT_REACHED,
+		NO_VIABLE_PATH,
+		VERSION_NEGOTIATION,
+		HANDSHAKE_TIMEOUT,
+		VERSION_NEGOTIATION_FAILURE,
+		IDLE_CLOSE,
+		FATAL,
+		NOMEM,
+		CALLBACK_FAILURE,
 	}
 
 	[CCode (cname = "ngtcp2_cid", destroy_function = "")]
@@ -16,14 +76,6 @@ namespace NGTcp2 {
 		public size_t datalen;
 		public uint8 data[MAX_CIDLEN];
 	}
-
-	[CCode (cname = "NGTCP2_MAX_CIDLEN")]
-	public const size_t MAX_CIDLEN;
-	[CCode (cname = "NGTCP2_MIN_INITIAL_DCIDLEN")]
-	public const size_t MIN_INITIAL_DCIDLEN;
-
-	[CCode (cname = "NGTCP2_STATELESS_RESET_TOKENLEN")]
-	public const size_t STATELESS_RESET_TOKENLEN;
 
 	[CCode (cname = "ngtcp2_connection_id_status_type", cprefix = "NGTCP2_CONNECTION_ID_STATUS_TYPE_", has_type_id = false)]
 	public enum ConnectionIdStatusType {
@@ -43,6 +95,62 @@ namespace NGTcp2 {
 		SUCCESS,
 		FAILURE,
 		ABORTED,
+	}
+
+	[CCode (cname = "uint32_t", cprefix = "NGTCP2_PROTO_VER_", has_type_id = false)]
+	public enum ProtocolVersion {
+		V1,
+		V2,
+		MIN,
+		MAX,
+	}
+
+	[CCode (cname = "ngtcp2_pkt_info", destroy_function = "")]
+	public struct PacketInfo {
+		public uint8 ecn;
+	}
+
+	[CCode (cname = "ngtcp2_pkt_hd", destroy_function = "")]
+	public struct PacketHeader {
+		public ConnectionID dcid;
+		public ConnectionID scid;
+		public int64 pkt_num;
+		[CCode (array_length_cname = "tokenlen")]
+		public uint8[]? token;
+		public size_t pkt_numlen;
+		public size_t len;
+		public uint32 version;
+		public uint8 type;
+		public uint8 flags;
+	}
+
+	[CCode (cname = "ngtcp2_pkt_stateless_reset", destroy_function = "")]
+	public struct PacketStatelessReset {
+		public uint8 stateless_reset_token[STATELESS_RESET_TOKENLEN];
+		[CCode (array_length_cname = "randlen")]
+		public uint8[] rand;
+	}
+
+	[Flags]
+	[CCode (cname = "uint32_t", cprefix = "NGTCP2_WRITE_STREAM_FLAG_", has_type_id = false)]
+	public enum WriteStreamFlags {
+		NONE,
+		MORE,
+		FIN,
+	}
+
+	[CCode (cname = "NGTCP2_MAX_CIDLEN")]
+	public const size_t MAX_CIDLEN;
+	[CCode (cname = "NGTCP2_MIN_INITIAL_DCIDLEN")]
+	public const size_t MIN_INITIAL_DCIDLEN;
+
+	[CCode (cname = "NGTCP2_STATELESS_RESET_TOKENLEN")]
+	public const size_t STATELESS_RESET_TOKENLEN;
+
+	[CCode (cname = "ngtcp2_vec", destroy_function = "")]
+	public struct IOVector {
+		[CCode (array_length_cname = "len")]
+		public unowned uint8[] base;
 	}
 
 	[CCode (cname = "ngtcp2_sa_family", cprefix = "NGTCP2_AF_", has_type_id = false)]
@@ -117,41 +225,12 @@ namespace NGTcp2 {
 		public uint8[] available_versions;
 	}
 
-	[CCode (cname = "uint32_t", cprefix = "NGTCP2_PROTO_VER_", has_type_id = false)]
-	public enum ProtocolVersion {
-		V1,
-		V2,
-		MIN,
-		MAX,
-	}
-
 	[CCode (cname = "ngtcp2_encryption_level", cprefix = "NGTCP2_ENCRYPTION_LEVEL_", has_type_id = false)]
 	public enum EncryptionLevel {
 		INITIAL,
 		HANDSHAKE,
 		1RTT,
 		0RTT,
-	}
-
-	[CCode (cname = "ngtcp2_pkt_hd", destroy_function = "")]
-	public struct PacketHeader {
-		public ConnectionID dcid;
-		public ConnectionID scid;
-		public int64 pkt_num;
-		[CCode (array_length_cname = "tokenlen")]
-		public uint8[]? token;
-		public size_t pkt_numlen;
-		public size_t len;
-		public uint32 version;
-		public uint8 type;
-		public uint8 flags;
-	}
-
-	[CCode (cname = "ngtcp2_pkt_stateless_reset", destroy_function = "")]
-	public struct PacketStatelessReset {
-		public uint8 stateless_reset_token[STATELESS_RESET_TOKENLEN];
-		[CCode (array_length_cname = "randlen")]
-		public uint8[] rand;
 	}
 
 	[CCode (cname = "ngtcp2_token_type", cprefix = "NGTCP2_TOKEN_TYPE_", has_type_id = false)]
@@ -198,6 +277,18 @@ namespace NGTcp2 {
 	[CCode (cname = "ngtcp2_tstamp")]
 	public struct Timestamp : uint64 {
 	}
+
+	[CCode (cname = "NGTCP2_SECONDS")]
+	public const uint64 SECONDS;
+
+	[CCode (cname = "NGTCP2_MILLISECONDS")]
+	public const uint64 MILLISECONDS;
+
+	[CCode (cname = "NGTCP2_MICROSECONDS")]
+	public const uint64 MICROSECONDS;
+
+	[CCode (cname = "NGTCP2_NANOSECONDS")]
+	public const uint64 NANOSECONDS;
 
 	[SimpleType]
 	[CCode (cname = "ngtcp2_duration")]
@@ -296,7 +387,7 @@ namespace NGTcp2 {
 	[CCode (cname = "ngtcp2_rand", has_target = false)]
 	public delegate void Rand ([CCode (array_length_type = "size_t")] uint8[] dest, RNGContext rand_ctx);
 	[CCode (cname = "ngtcp2_get_new_connection_id", has_target = false)]
-	public delegate int GetNewConnectionId (Connection conn, ConnectionID cid, [CCode (array_length = false)] uint8[] token,
+	public delegate int GetNewConnectionId (Connection conn, out ConnectionID cid, [CCode (array_length = false)] uint8[] token,
 		size_t cidlen, void * user_data);
 	[CCode (cname = "ngtcp2_remove_connection_id", has_target = false)]
 	public delegate int RemoveConnectionId (Connection conn, ConnectionID cid, void * user_data);
