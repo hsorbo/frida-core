@@ -481,7 +481,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public async void create_listener (string device_address, Cancellable? cancellable = null) throws Error, IOError {
-			Key key = make_rsa_keypair ();
+			Key local_keypair = make_rsa_keypair ();
 
 			string request = Json.to_string (
 				new Json.Builder ()
@@ -495,7 +495,7 @@ namespace Frida.Fruity.XPC {
 								.set_member_name ("transportProtocolType")
 								.add_string_value ("quic")
 								.set_member_name ("key")
-								.add_string_value (Base64.encode (get_raw_public_key (key).get_data ()))
+								.add_string_value (Base64.encode (key_to_der (local_keypair)))
 							.end_object ()
 						.end_object ()
 					.end_object ()
@@ -529,12 +529,14 @@ namespace Frida.Fruity.XPC {
 			if (error != null)
 				throw new Error.PROTOCOL ("Invalid response: %s", error.message);
 
-			printerr ("\n=== Yay:\n");
-			printerr (@"device_pubkey: \"$device_pubkey\"\n");
-			printerr (@"port: $port\n");
+			Key remote_pubkey = key_from_der (Base64.decode (device_pubkey));
 
 			tunnel_connection_todo =
-				yield TunnelConnection.open (new InetSocketAddress.from_string (device_address, port)/*, key*/, cancellable);
+				yield TunnelConnection.open (
+					new InetSocketAddress.from_string (device_address, port),
+					new TunnelKey ((owned) local_keypair),
+					new TunnelKey ((owned) remote_pubkey),
+					cancellable);
 		}
 
 		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
@@ -873,30 +875,36 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private static Key make_rsa_keypair () {
-			var cert = new X509 ();
-			cert.get_serial_number ().set_uint64 (1);
-			cert.get_not_before ().adjust (0);
-			cert.get_not_after ().adjust (15780000);
-
-			unowned X509.Name name = cert.get_subject_name ();
-			name.add_entry_by_txt ("C", ASCII, "CA".data);
-			name.add_entry_by_txt ("O", ASCII, "Frida".data);
-			name.add_entry_by_txt ("CN", ASCII, "lolcathost".data);
-			cert.set_issuer_name (name);
-
-			var kc = new KeyContext.for_key_type (RSA);
-			kc.keygen_init ();
+			var ctx = new KeyContext.for_key_type (RSA);
+			ctx.keygen_init ();
 
 			Key? keypair = null;
-			kc.keygen (ref keypair);
-
-			cert.set_pubkey (keypair);
-
-			var mc = new MessageDigestContext ();
-			mc.digest_sign_init (null, null, null, keypair);
-			cert.sign_ctx (mc);
+			ctx.keygen (ref keypair);
 
 			return keypair;
+		}
+
+		private static uint8[] key_to_der (Key key) {
+			var sink = new BasicIO (BasicIOMethod.memory ());
+			key.to_der (sink);
+			unowned uint8[] der_data = get_basic_io_content (sink);
+			uint8[] der_data_owned = der_data;
+			return der_data_owned;
+		}
+
+		private static Key key_from_der (uint8[] der) throws Error {
+			var source = new BasicIO.from_static_memory_buffer (der);
+			Key? key = new Key.from_der (source);
+			if (key == null)
+				throw new Error.PROTOCOL ("Invalid key");
+			return key;
+		}
+
+		private static unowned uint8[] get_basic_io_content (BasicIO bio) {
+			unowned uint8[] data;
+			long n = bio.get_mem_data (out data);
+			data.length = (int) n;
+			return data;
 		}
 
 		private static Bytes derive_shared_key (Key local_keypair, Key remote_pubkey) {
@@ -1174,12 +1182,15 @@ namespace Frida.Fruity.XPC {
 			construct;
 		}
 
-		/*
-		public Key key {
+		public TunnelKey local_keypair {
 			get;
 			construct;
 		}
-		*/
+
+		public TunnelKey remote_pubkey {
+			get;
+			construct;
+		}
 
 		private Socket socket;
 		private uint8[] raw_local_address;
@@ -1200,9 +1211,9 @@ namespace Frida.Fruity.XPC {
 		private const string ALPN = "\x1bRemotePairingTunnelProtocol";
 		private const size_t MAX_TX_UDP_PAYLOAD_SIZE = 14000;
 
-		public static async TunnelConnection open (InetSocketAddress address, /*Key key,*/
+		public static async TunnelConnection open (InetSocketAddress address, TunnelKey local_keypair, TunnelKey remote_pubkey,
 				Cancellable? cancellable = null) throws Error, IOError {
-			var connection = new TunnelConnection (address/*, key*/);
+			var connection = new TunnelConnection (address, local_keypair, remote_pubkey);
 
 			try {
 				yield connection.init_async (Priority.DEFAULT, cancellable);
@@ -1213,8 +1224,12 @@ namespace Frida.Fruity.XPC {
 			return connection;
 		}
 
-		private TunnelConnection (InetSocketAddress address/*, Key key*/) {
-			Object (address: address/*, key: key*/);
+		private TunnelConnection (InetSocketAddress address, TunnelKey local_keypair, TunnelKey remote_pubkey) {
+			Object (
+				address: address,
+				local_keypair: local_keypair,
+				remote_pubkey: remote_pubkey
+			);
 		}
 
 		construct {
@@ -1224,8 +1239,9 @@ namespace Frida.Fruity.XPC {
 			};
 			connection_ref.user_data = this;
 
-			ssl_ctx = new OpenSSL.SSLContext (OpenSSL.SSLMethod.fetch_tls_client ());
+			ssl_ctx = new OpenSSL.SSLContext (OpenSSL.SSLMethod.tls_client ());
 			NGTcp2.Crypto.Quictls.configure_client_context (ssl_ctx);
+			ssl_ctx.use_private_key (local_keypair.handle);
 
 			ssl = new OpenSSL.SSL (ssl_ctx);
 			ssl.set_app_data (&connection_ref);
@@ -1466,6 +1482,14 @@ namespace Frida.Fruity.XPC {
 
 		private static NGTcp2.Timestamp make_timestamp () {
 			return get_monotonic_time () * NGTcp2.MICROSECONDS;
+		}
+	}
+
+	private sealed class TunnelKey {
+		public Key handle;
+
+		public TunnelKey (owned Key handle) {
+			this.handle = (owned) handle;
 		}
 	}
 

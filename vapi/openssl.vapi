@@ -3,6 +3,9 @@ namespace OpenSSL {
 	[CCode (cname = "SSL_CTX", cprefix = "SSL_CTX_")]
 	public class SSLContext {
 		public SSLContext (SSLMethod meth);
+
+		[CCode (cname = "SSL_CTX_use_PrivateKey")]
+		public int use_private_key (Envelope.Key key);
 	}
 
 	[Compact]
@@ -24,18 +27,18 @@ namespace OpenSSL {
 	[CCode (cname = "SSL_METHOD", cprefix = "SSL_METHOD_", free_function = "")]
 	public class SSLMethod {
 		[CCode (cname = "TLS_method")]
-		public static unowned SSLMethod fetch_tls ();
+		public static unowned SSLMethod tls ();
 		[CCode (cname = "TLS_server_method")]
-		public static unowned SSLMethod fetch_tls_server ();
+		public static unowned SSLMethod tls_server ();
 		[CCode (cname = "TLS_client_method")]
-		public static unowned SSLMethod fetch_tls_client ();
+		public static unowned SSLMethod tls_client ();
 
 		[CCode (cname = "DTLS_method")]
-		public static unowned SSLMethod fetch_dtls ();
+		public static unowned SSLMethod dtls ();
 		[CCode (cname = "DTLS_server_method")]
-		public static unowned SSLMethod fetch_dtls_server ();
+		public static unowned SSLMethod dtls_server ();
 		[CCode (cname = "DTLS_client_method")]
-		public static unowned SSLMethod fetch_dtls_client ();
+		public static unowned SSLMethod dtls_client ();
 	}
 
 	[CCode (lower_case_cprefix = "TLSEXT_TYPE_")]
@@ -63,11 +66,47 @@ namespace OpenSSL {
 
 		public int sign_ctx (Envelope.MessageDigestContext ctx);
 
+		[CCode (cname = "X509_get_X509_PUBKEY")]
+		public unowned X509PublicKey get_public_key ();
+
+		[CCode (cname = "i2d_X509_bio", instance_pos = 2)]
+		public int to_der (BasicIO sink);
+
+		[CCode (cname = "PEM_write_bio_X509", instance_pos = 2)]
+		public int to_pem (BasicIO sink);
+
 		[Compact]
 		[CCode (cname = "X509_NAME", cprefix = "X509_NAME_")]
 		public class Name {
 			public int add_entry_by_txt (string field, ASN1.MultiByteStringType type, uint8[] bytes, int loc = -1, int set = 0);
 		}
+	}
+
+	[Compact]
+	[CCode (cname = "X509_PUBKEY", cprefix = "X509_PUBKEY_", free_function = "")]
+	public class X509PublicKey {
+		[CCode (cname = "i2d_X509_PUBKEY_bio", instance_pos = 2)]
+		public int to_der (BasicIO sink);
+
+		[CCode (cname = "PEM_write_bio_X509_PUBKEY", instance_pos = 2)]
+		public int to_pem (BasicIO sink);
+	}
+
+	[Compact]
+	[CCode (cname = "BIO", cprefix = "BIO_")]
+	public class BasicIO {
+		public BasicIO (BasicIOMethod method);
+		[CCode (cname = "BIO_new_mem_buf")]
+		public BasicIO.from_static_memory_buffer (uint8[] buf);
+
+		public long get_mem_data ([CCode (array_length = false)] out unowned uint8[] data);
+	}
+
+	[Compact]
+	[CCode (cname = "BIO_METHOD", cprefix = "BIO_METHOD_", free_function = "")]
+	public class BasicIOMethod {
+		[CCode (cname = "BIO_s_mem")]
+		public static unowned BasicIOMethod memory ();
 	}
 
 	[CCode (cheader_filename = "openssl/asn1.h")]
@@ -113,8 +152,10 @@ namespace OpenSSL {
 		}
 
 		[Compact]
-		[CCode (cname = "EVP_PKEY", cprefix = "EVP_PKEY_")]
+		[CCode (cname = "EVP_PKEY", cprefix = "EVP_PKEY_", copy_function = "EVP_PKEY_dup")]
 		public class Key {
+			[CCode (cname = "d2i_PUBKEY_bio")]
+			public Key.from_der (BasicIO source, Key ** a = null);
 			[CCode (cname = "EVP_PKEY_new_raw_public_key")]
 			public Key.from_raw_public_key (KeyType type, Engine? engine, uint8[] pub);
 			[CCode (cname = "EVP_PKEY_new_raw_private_key")]
@@ -122,6 +163,12 @@ namespace OpenSSL {
 
 			public int get_raw_public_key ([CCode (array_length = false)] uint8[]? pub, ref size_t len);
 			public int get_raw_private_key ([CCode (array_length = false)] uint8[]? priv, ref size_t len);
+
+			[CCode (cname = "i2d_PUBKEY_bio", instance_pos = 2)]
+			public int to_der (BasicIO sink);
+
+			[CCode (cname = "PEM_write_bio_PUBKEY", instance_pos = 2)]
+			public int to_pem (BasicIO sink);
 		}
 
 		[Compact]
