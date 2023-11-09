@@ -22,6 +22,9 @@ namespace NGTcp2 {
 			int64 stream_id, uint8[]? data, Timestamp ts);
 		public ssize_t writev_stream (Path * path, PacketInfo * pi, uint8[] dest, ssize_t * pdatalen, WriteStreamFlags flags,
 			int64 stream_id, IOVector[] datav, Timestamp ts);
+
+		public uint64 get_max_data_left ();
+		public uint64 get_max_stream_data_left (int64 stream_id);
 	}
 
 	public unowned string strerror (int liberr);
