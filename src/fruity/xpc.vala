@@ -1206,6 +1206,8 @@ namespace Frida.Fruity.XPC {
 
 		private int64 control_stream_id = -1;
 
+		private Promise<bool> established = new Promise<bool> ();
+
 		private Cancellable io_cancellable = new Cancellable ();
 
 		private const string ALPN = "\x1bRemotePairingTunnelProtocol";
@@ -1272,18 +1274,18 @@ namespace Frida.Fruity.XPC {
 			};
 
 			var callbacks = NGTcp2.Callbacks () {
+				get_new_connection_id = on_get_new_connection_id,
+				extend_max_local_streams_bidi = (conn, max_streams, user_data) => {
+					TunnelConnection * self = user_data;
+					return self->on_extend_max_local_streams_bidi (max_streams);
+				},
+				rand = on_rand,
 				client_initial = NGTcp2.Crypto.client_initial_cb,
 				recv_crypto_data = NGTcp2.Crypto.recv_crypto_data_cb,
 				encrypt = NGTcp2.Crypto.encrypt_cb,
 				decrypt = NGTcp2.Crypto.decrypt_cb,
 				hp_mask = NGTcp2.Crypto.hp_mask_cb,
 				recv_retry = NGTcp2.Crypto.recv_retry_cb,
-				extend_max_local_streams_bidi = (conn, max_streams, user_data) => {
-					TunnelConnection * self = user_data;
-					return self->on_extend_max_local_streams_bidi (max_streams);
-				},
-				rand = on_rand,
-				get_new_connection_id = on_get_new_connection_id,
 				update_key = NGTcp2.Crypto.update_key_cb,
 				delete_crypto_aead_ctx = NGTcp2.Crypto.delete_crypto_aead_ctx_cb,
 				delete_crypto_cipher_ctx = NGTcp2.Crypto.delete_crypto_cipher_ctx_cb,
@@ -1310,6 +1312,10 @@ namespace Frida.Fruity.XPC {
 			rx_source.attach (MainContext.get_thread_default ());
 
 			process_pending_writes ();
+
+			yield established.future.wait_async (cancellable);
+
+			connection.open_bidi_stream (out control_stream_id, null);
 
 			return true;
 		}
@@ -1431,23 +1437,6 @@ namespace Frida.Fruity.XPC {
 			return Source.REMOVE;
 		}
 
-		private int on_extend_max_local_streams_bidi (uint64 max_streams) {
-			if (control_stream_id != -1) {
-				printerr ("on_extend_max_local_streams_bidi(): no-op\n");
-				return 0;
-			}
-
-			connection.open_bidi_stream (out control_stream_id, null);
-			printerr ("on_extend_max_local_streams_bidi(): created control_stream_id=%" + int64.FORMAT_MODIFIER + "d\n",
-				control_stream_id);
-
-			return 0;
-		}
-
-		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
-			OpenSSL.Rng.generate (dest);
-		}
-
 		private static int on_get_new_connection_id (NGTcp2.Connection conn, out NGTcp2.ConnectionID cid, uint8[] token,
 				size_t cidlen, void * user_data) {
 			cid = make_connection_id (cidlen);
@@ -1455,6 +1444,17 @@ namespace Frida.Fruity.XPC {
 			OpenSSL.Rng.generate (token[:NGTcp2.STATELESS_RESET_TOKENLEN]);
 
 			return 0;
+		}
+
+		private int on_extend_max_local_streams_bidi (uint64 max_streams) {
+			if (!established.future.ready)
+				established.resolve (true);
+
+			return 0;
+		}
+
+		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
+			OpenSSL.Rng.generate (dest);
 		}
 
 		private static void on_log_printf (void * user_data, string format, ...) {
@@ -1800,8 +1800,6 @@ namespace Frida.Fruity.XPC {
 			default = INACTIVE;
 		}
 
-		private Cancellable io_cancellable = new Cancellable ();
-
 		private Error? pending_error;
 
 		private Promise<bool> ready = new Promise<bool> ();
@@ -1819,6 +1817,8 @@ namespace Frida.Fruity.XPC {
 
 		private ByteArray? send_queue;
 		private Source? send_source;
+
+		private Cancellable io_cancellable = new Cancellable ();
 
 		public enum State {
 			INACTIVE,
