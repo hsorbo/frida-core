@@ -5,6 +5,8 @@ namespace OpenSSL {
 	public class SSLContext {
 		public SSLContext (SSLMethod meth);
 
+		[CCode (cname = "SSL_CTX_use_certificate")]
+		public int use_certificate (X509 cert);
 		[CCode (cname = "SSL_CTX_use_PrivateKey")]
 		public int use_private_key (Envelope.Key key);
 	}

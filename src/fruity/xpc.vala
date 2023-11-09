@@ -1241,6 +1241,7 @@ namespace Frida.Fruity.XPC {
 
 			ssl_ctx = new OpenSSL.SSLContext (OpenSSL.SSLMethod.tls_client ());
 			NGTcp2.Crypto.Quictls.configure_client_context (ssl_ctx);
+			ssl_ctx.use_certificate (make_certificate (local_keypair.handle));
 			ssl_ctx.use_private_key (local_keypair.handle);
 
 			ssl = new OpenSSL.SSL (ssl_ctx);
@@ -1482,6 +1483,23 @@ namespace Frida.Fruity.XPC {
 
 		private static NGTcp2.Timestamp make_timestamp () {
 			return get_monotonic_time () * NGTcp2.MICROSECONDS;
+		}
+
+		private static X509 make_certificate (Key keypair) {
+			var cert = new X509 ();
+			cert.get_serial_number ().set_uint64 (1);
+			cert.get_not_before ().adjust (0);
+			cert.get_not_after ().adjust (5260000);
+
+			unowned X509.Name name = cert.get_subject_name ();
+			cert.set_issuer_name (name);
+			cert.set_pubkey (keypair);
+
+			var mc = new MessageDigestContext ();
+			mc.digest_sign_init (null, null, null, keypair);
+			cert.sign_ctx (mc);
+
+			return cert;
 		}
 	}
 
