@@ -48,6 +48,7 @@ namespace Frida.Fruity.XPC {
 
 			yield tunnel.create_listener (device.address, cancellable);
 
+			printerr ("\n\n=== Yay. Sleeping indefinitely.\n");
 			yield;
 		} catch (Error e) {
 			printerr ("%s\n", e.message);
