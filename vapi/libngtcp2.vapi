@@ -10,6 +10,8 @@ namespace NGTcp2 {
 
 		public void set_tls_native_handle (void * tls_native_handle);
 
+		public void set_keep_alive_timeout (Duration timeout);
+
 		public Timestamp get_expiry ();
 		public int handle_expiry (Timestamp ts);
 
@@ -22,6 +24,11 @@ namespace NGTcp2 {
 			int64 stream_id, uint8[]? data, Timestamp ts);
 		public ssize_t writev_stream (Path * path, PacketInfo * pi, uint8[] dest, ssize_t * pdatalen, WriteStreamFlags flags,
 			int64 stream_id, IOVector[] datav, Timestamp ts);
+
+		public ssize_t write_datagram (Path * path, PacketInfo * pi, uint8[] dest, int * paccepted, uint32 flags, uint64 dgram_id,
+			uint8[] data, Timestamp ts);
+		public ssize_t writev_datagram (Path * path, PacketInfo * pi, uint8[] dest, int * paccepted, uint32 flags, uint64 dgram_id,
+			IOVector[] datav, Timestamp ts);
 
 		public uint64 get_max_data_left ();
 		public uint64 get_max_stream_data_left (int64 stream_id);

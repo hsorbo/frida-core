@@ -305,8 +305,6 @@ namespace Frida.Fruity.XPC {
 
 		private Promise<Variant> handshake_promise = new Promise<Variant> ();
 		private Variant handshake_body;
-		private Source? heartbeat_source;
-		private uint64 next_heartbeat_seqno = 1;
 
 		public static async DiscoveryService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
 			var service = new DiscoveryService (stream);
@@ -332,14 +330,6 @@ namespace Frida.Fruity.XPC {
 
 			handshake_body = yield handshake_promise.future.wait_async (cancellable);
 
-			var source = new TimeoutSource.seconds (2);
-			source.set_callback (() => {
-				send_heartbeat.begin ();
-				return Source.CONTINUE;
-			});
-			source.attach (MainContext.get_thread_default ());
-			heartbeat_source = source;
-
 			return true;
 		}
 
@@ -361,11 +351,6 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private void on_close (Error? error) {
-			if (heartbeat_source != null) {
-				heartbeat_source.destroy ();
-				heartbeat_source = null;
-			}
-
 			if (!handshake_promise.future.ready) {
 				handshake_promise.reject (
 					(error != null)
@@ -386,20 +371,6 @@ namespace Frida.Fruity.XPC {
 				if (message_type == "Handshake")
 					handshake_promise.resolve (msg.body);
 			} catch (Error e) {
-			}
-		}
-
-		private async void send_heartbeat () {
-			try {
-				yield connection.request (new BodyBuilder ()
-							.begin_dictionary ()
-								.set_member_name ("MessageType")
-								.add_string_value ("Heartbeat")
-								.set_member_name ("SequenceNumber")
-								.add_uint64_value (next_heartbeat_seqno++)
-							.end_dictionary ()
-						.build (), io_cancellable);
-			} catch (GLib.Error e) {
 			}
 		}
 	}
@@ -503,8 +474,6 @@ namespace Frida.Fruity.XPC {
 				.get_root (), false);
 
 			string response = yield request_encrypted (request, cancellable);
-
-			printerr ("Got: %s\n", response);
 
 			Json.Reader reader;
 			try {
@@ -1200,8 +1169,8 @@ namespace Frida.Fruity.XPC {
 		private OpenSSL.SSL ssl;
 
 		private SocketSource? rx_source;
-		private uint8[] rx_buf = new uint8[MAX_TX_UDP_PAYLOAD_SIZE];
-		private uint8[] tx_buf = new uint8[MAX_TX_UDP_PAYLOAD_SIZE];
+		private uint8[] rx_buf = new uint8[MAX_UDP_PAYLOAD_SIZE];
+		private uint8[] tx_buf = new uint8[MAX_UDP_PAYLOAD_SIZE];
 		private Source? expiry_timer = null;
 
 		private int64 control_stream_id = -1;
@@ -1212,8 +1181,10 @@ namespace Frida.Fruity.XPC {
 		private Cancellable io_cancellable = new Cancellable ();
 
 		private const string ALPN = "\x1bRemotePairingTunnelProtocol";
-		private const size_t MAX_TX_UDP_PAYLOAD_SIZE = 14000;
-		private const size_t MTU = 1420;
+		private const size_t PREFERRED_MTU = 1420;
+		private const size_t MAX_UDP_PAYLOAD_SIZE = 1452;
+		private const size_t MAX_QUIC_DATAGRAM_SIZE = 14000;
+		private const NGTcp2.Duration KEEP_ALIVE_TIMEOUT = 15ULL * NGTcp2.SECONDS;
 
 		public static async TunnelConnection open (InetSocketAddress address, TunnelKey local_keypair, TunnelKey remote_pubkey,
 				Cancellable? cancellable = null) throws Error, IOError {
@@ -1268,7 +1239,7 @@ namespace Frida.Fruity.XPC {
 			}
 
 			var dcid = make_connection_id (NGTcp2.MIN_INITIAL_DCIDLEN);
-			var scid = make_connection_id (8);
+			var scid = make_connection_id (NGTcp2.MIN_INITIAL_DCIDLEN);
 
 			var path = NGTcp2.Path () {
 				local = NGTcp2.Address () { addr = raw_local_address },
@@ -1310,16 +1281,19 @@ namespace Frida.Fruity.XPC {
 			var settings = NGTcp2.Settings.make_default ();
 			settings.initial_ts = make_timestamp ();
 			settings.log_printf = (NGTcp2.Printf) on_log_printf;
-			settings.max_tx_udp_payload_size = MAX_TX_UDP_PAYLOAD_SIZE;
+			settings.max_tx_udp_payload_size = MAX_UDP_PAYLOAD_SIZE;
 			settings.handshake_timeout = 5ULL * NGTcp2.SECONDS;
 
 			var transport_params = NGTcp2.TransportParams.make_default ();
-			transport_params.initial_max_stream_data_bidi_local = 128 * 1024;
-			transport_params.initial_max_data = 1024 * 1024;
+			transport_params.max_datagram_frame_size = MAX_QUIC_DATAGRAM_SIZE;
+			transport_params.max_idle_timeout = 30ULL * NGTcp2.SECONDS;
+			transport_params.initial_max_data = 1048576;
+			transport_params.initial_max_stream_data_bidi_local = 1048576;
 
 			NGTcp2.Connection.make_client (out connection, dcid, scid, path, NGTcp2.ProtocolVersion.V1, callbacks,
 				settings, transport_params, null, this);
 			connection.set_tls_native_handle (ssl);
+			connection.set_keep_alive_timeout (KEEP_ALIVE_TIMEOUT);
 
 			rx_source = socket.create_source (IOCondition.IN, io_cancellable);
 			rx_source.set_callback (on_socket_readable);
@@ -1336,7 +1310,7 @@ namespace Frida.Fruity.XPC {
 					.set_member_name ("type")
 					.add_string_value ("clientHandshakeRequest")
 					.set_member_name ("mtu")
-					.add_int_value (MTU)
+					.add_int_value (PREFERRED_MTU)
 				.end_object ()
 				.get_root (), false));
 
@@ -1370,8 +1344,6 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private bool on_socket_readable (DatagramBased datagram_based, IOCondition condition) {
-			printerr ("on_socket_readable()\n");
-
 			try {
 				SocketAddress remote_address;
 				ssize_t n = socket.receive_from (out remote_address, rx_buf, io_cancellable);
@@ -1386,48 +1358,60 @@ namespace Frida.Fruity.XPC {
 				unowned uint8[] data = rx_buf[:n];
 
 				int res = connection.read_packet (path, null, data, make_timestamp ());
-				if (res != 0) {
+				if (res != 0)
 					printerr ("read_packet() failed: %s\n", NGTcp2.strerror (res));
-				}
 			} catch (GLib.Error e) {
 				return Source.REMOVE;
+			} finally {
+				process_pending_writes ();
 			}
 
 			return Source.CONTINUE;
 		}
 
+		// TODO: Refactor this:
+		private bool is_first_write = true;
+
 		private void process_pending_writes () {
+			var ts = make_timestamp ();
+
 			var pi = NGTcp2.PacketInfo ();
 			while (true) {
+				ssize_t n = -1;
 				ssize_t datalen = 0;
 
 				int64 stream_id = -1;
 				unowned uint8[]? data = null;
 				uint64 data_left = 0;
+				bool skip_write_stream = false;
 				if (control_stream_id != -1 && control_stream_tx_buf.len != 0 &&
 						(data_left = connection.get_max_stream_data_left (control_stream_id)) != 0) {
-					stream_id = control_stream_id;
-					data = control_stream_tx_buf.data[:(int) uint64.min ((uint64) control_stream_tx_buf.len, data_left)];
-
-					printerr (@"\n\n=== write_stream() sending (data_left=$data_left):\n");
-					hexdump (data);
-					printerr ("===\n\n");
+					if (is_first_write) {
+						int accepted = -1;
+						var zeroed_padding_packet = new uint8[1024];
+						n = connection.write_datagram (null, null, tx_buf, &accepted, NGTcp2.WriteStreamFlags.MORE,
+							1, zeroed_padding_packet, ts);
+						datalen = accepted;
+						skip_write_stream = true;
+						is_first_write = false;
+					} else {
+						stream_id = control_stream_id;
+						data = control_stream_tx_buf.data[:(int) uint64.min ((uint64) control_stream_tx_buf.len, data_left)];
+					}
 				}
 
-				var ts = make_timestamp ();
+				if (!skip_write_stream) {
+					n = connection.write_stream (null, &pi, tx_buf, &datalen, NGTcp2.WriteStreamFlags.MORE, stream_id,
+						data, ts);
+				}
 
-				ssize_t n = connection.write_stream (null, &pi, tx_buf, &datalen, NGTcp2.WriteStreamFlags.MORE, stream_id,
-					data, ts);
-				printerr ("write_stream() => %zd\n", n);
 				if (n < 0) {
 					if (n == NGTcp2.ErrorCode.WRITE_MORE) {
-						// TODO: advance tx cursor
-						printerr ("write_stream(): advancing tx cursor case A\n");
-						advance_control_stream_tx_cursor (datalen);
+						if (!skip_write_stream)
+							advance_control_stream_tx_cursor (datalen);
 						continue;
 					} else {
 						printerr ("write_stream() TODO: handle error %s\n", NGTcp2.strerror ((int) n));
-						// TODO
 						break;
 					}
 				}
@@ -1436,14 +1420,12 @@ namespace Frida.Fruity.XPC {
 					break;
 
 				if (datalen > 0) {
-					// TODO: advance tx cursor
-					printerr ("write_stream(): advance tx cursor case B\n");
-					advance_control_stream_tx_cursor (datalen);
+					if (!skip_write_stream)
+						advance_control_stream_tx_cursor (datalen);
 				}
 
 				try {
-					ssize_t num_bytes_written = socket.send (tx_buf[:n], io_cancellable);
-					printerr ("write_stream() wrote %zd bytes\n", num_bytes_written);
+					socket.send (tx_buf[:n], io_cancellable);
 				} catch (GLib.Error e) {
 					printerr ("write_stream() send() failed: %s\n", e.message);
 					continue;
@@ -2158,6 +2140,7 @@ namespace Frida.Fruity.XPC {
 
 					session.consume_connection (n);
 				} catch (GLib.Error e) {
+					printerr ("\n\n\nUH OH: %s\n\n\n", e.message);
 					if (e is Error && pending_error == null)
 						pending_error = (Error) e;
 					is_processing_messages = false;
