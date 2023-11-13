@@ -399,7 +399,7 @@ namespace Frida.Fruity.XPC {
 		private uint64 next_control_sequence_number = 0;
 		private uint64 next_encrypted_sequence_number = 0;
 
-		private string host_identifier;
+		private string? host_identifier;
 		private Key? pair_record_key;
 		private ChaCha20Poly1305? client_cipher;
 		private ChaCha20Poly1305? server_cipher;
@@ -421,10 +421,21 @@ namespace Frida.Fruity.XPC {
 		}
 
 		construct {
-			host_identifier = "<...>";
-			pair_record_key = new Key.from_raw_private_key (ED25519, null, {
-				<...>
-			});
+			try {
+				uint8[] raw_identity;
+				FileUtils.get_data (
+					"/var/db/lockdown/RemotePairing/user_%u/selfIdentity.plist".printf ((uint) Posix.getuid ()),
+					out raw_identity);
+				Plist identity = new Plist.from_data (raw_identity);
+
+				unowned string identifier = identity.get_string ("identifier");
+				Bytes key = identity.get_bytes ("privateKey");
+
+				host_identifier = identifier;
+				pair_record_key = new Key.from_raw_private_key (ED25519, null, key.get_data ());
+			} catch (GLib.Error e) {
+				printerr ("%s\n", e.message);
+			}
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -572,6 +583,9 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async Bytes? verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
+			if (host_identifier == null || pair_record_key == null)
+				return null;
+
 			Key host_keypair = make_x25519_keypair ();
 
 			Bytes start_params = new PairingParamsBuilder ()
