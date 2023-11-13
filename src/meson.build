@@ -489,11 +489,16 @@ fruity_sources = [
   'fruity/plist-service.vala',
 ]
 if host_os_family == 'windows'
-  fruity_sources += ['fruity/fruity-host-session-windows.c']
+  fruity_sources += 'fruity/fruity-host-session-windows.c'
 elif host_os_family == 'darwin'
-  fruity_sources += ['fruity/fruity-host-session-darwin.m']
+  fruity_sources += 'fruity/fruity-host-session-darwin.m'
 else
-  fruity_sources += ['fruity/fruity-host-session-unix.c']
+  fruity_sources += 'fruity/fruity-host-session-unix.c'
+endif
+if host_os_family == 'darwin'
+  fruity_sources += 'fruity/xpc-darwin.vala'
+elif host_os_family == 'linux'
+  fruity_sources += 'fruity/xpc-linux.vala'
 endif
 backend_vala_args += '--pkg=openssl'
 if host_os_family == 'darwin'
@@ -550,5 +555,6 @@ subdir('api')
 
 executable('xpc-test',
   'fruity/xpc-test.vala',
+  vala_args: ['--pkg=posix'],
   dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep, core_dep],
 )

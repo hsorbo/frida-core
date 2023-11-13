@@ -18,7 +18,7 @@ namespace Frida.Fruity.XPC {
 		try {
 			PairingService[]? services = null;
 
-			var browser = new PairingBrowser ();
+			var browser = PairingBrowser.make_default ();
 			browser.services_discovered.connect (s => {
 				printerr ("Found %u services\n", s.length);
 				if (services == null) {
