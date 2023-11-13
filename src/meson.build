@@ -499,6 +499,11 @@ if have_fruity_backend
     backend_sources += 'fruity' / 'fruity-host-session-unix.c'
   endif
 
+  if host_os_family == 'darwin'
+    backend_sources += 'fruity/xpc-darwin.vala'
+  elif host_os_family == 'linux'
+    backend_sources += 'fruity/xpc-linux.vala'
+  endif
   backend_vala_args += '--pkg=openssl'
   if host_os_family == 'darwin'
     backend_vala_args += [
@@ -601,5 +606,6 @@ endif
 
 executable('xpc-test',
   'fruity/xpc-test.vala',
-  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep, core_dep],
+  vala_args: [gum_vala_args, '--pkg=posix'],
+  dependencies: [gio_dep, gio_unix_dep, gee_dep, base_dep, core_dep, gum_dep],
 )
