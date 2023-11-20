@@ -959,6 +959,8 @@ namespace Frida.Fruity.XPC {
 
 		private string? local_ipv6_address;
 		private string? local_ipv6_netmask;
+		private string? remote_ipv6_address;
+		private uint16 remote_rsd_port;
 		private LWIP.NetworkInterface netif;
 
 		private Promise<bool> established = new Promise<bool> ();
@@ -993,7 +995,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		static construct {
-			LWIP.Tcp.init (() => {});
+			LWIP.Runtime.init (() => {});
 		}
 
 		construct {
@@ -1125,27 +1127,60 @@ namespace Frida.Fruity.XPC {
 			string? netmask = reader.get_string_value ();
 			reader.end_member ();
 
-			if (address == null || netmask == null)
+			reader.end_member ();
+
+			reader.read_member ("serverAddress");
+			string? server_address = reader.get_string_value ();
+			reader.end_member ();
+
+			reader.read_member ("serverRSDPort");
+			int64 server_rsd_port = reader.get_int_value ();
+			reader.end_member ();
+
+			if (address == null || netmask == null || server_address == null || server_rsd_port == 0)
 				throw new Error.PROTOCOL ("Missing parameters");
 
-			printerr (@"Got address=\"$address\" netmask=\"$netmask\"\n");
+			printerr ("%s\n", json);
+
+			printerr (@"Got address=\"$address\" netmask=\"$netmask\" server_address=\"$server_address\" server_rsd_port=$server_rsd_port\n");
 			local_ipv6_address = address;
 			local_ipv6_netmask = netmask;
+			remote_ipv6_address = server_address;
+			remote_rsd_port = (uint16) server_rsd_port;
 
-			LWIP.Tcp.schedule (setup_network_interface);
+			LWIP.Runtime.schedule (setup_network_interface);
 		}
 
 		private void setup_network_interface () {
-			LWIP.NetworkInterface.add_noaddr (ref netif, null, on_netif_init, on_netif_input);
+			LWIP.NetworkInterface.add_noaddr (ref netif, this, on_netif_init, on_netif_input);
+
+			var pcb = new LWIP.TcpPcb (V6);
+			printerr ("allocated tcp_pcb %p\n", pcb);
+			pcb.bind_netif (netif);
+
+			var addr = LWIP.IPAddress ();
+			addr.ip6 = LWIP.IP6Address.parse (remote_ipv6_address);
+			addr.type = V6;
+			var res = pcb.connect (addr, remote_rsd_port, on_tcp_pcb_connected);
+			printerr ("tcp_connect() => %d\n", res);
 		}
 
 		private static LWIP.Result on_netif_init (LWIP.NetworkInterface netif) {
 			printerr ("on_netif_init()\n");
+			TunnelConnection * self = netif.state;
+
+			netif.add_ip6_address (LWIP.IP6Address.parse (self->local_ipv6_address));
+
 			return OK;
 		}
 
 		private static LWIP.Result on_netif_input (void * pbuf, LWIP.NetworkInterface netif) {
 			printerr ("on_netif_input()\n");
+			return OK;
+		}
+
+		private static LWIP.Result on_tcp_pcb_connected (void * arg, LWIP.TcpPcb pcb, LWIP.Result res) {
+			printerr ("on_tcp_pcb_connected()\n");
 			return OK;
 		}
 
