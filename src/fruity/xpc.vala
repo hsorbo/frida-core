@@ -21,17 +21,14 @@ namespace Frida.Fruity.XPC {
 	public interface PairingService : Object {
 		public abstract string name {
 			get;
-			construct;
 		}
 
 		public abstract uint interface_index {
 			get;
-			construct;
 		}
 
 		public abstract string interface_name {
 			get;
-			construct;
 		}
 
 		public abstract async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable = null) throws Error, IOError;
@@ -45,17 +42,14 @@ namespace Frida.Fruity.XPC {
 	public interface PairingServiceHost : Object {
 		public abstract string name {
 			get;
-			construct;
 		}
 
 		public abstract uint16 port {
 			get;
-			construct;
 		}
 
 		public abstract Bytes txt_record {
 			get;
-			construct;
 		}
 
 		public abstract async Gee.List<InetSocketAddress> resolve (Cancellable? cancellable = null) throws Error, IOError;
@@ -995,7 +989,7 @@ namespace Frida.Fruity.XPC {
 
 		static construct {
 			LWIP.Tcp.init (() => {
-				printerr ("init done!\n");
+				printerr ("init done!!\n");
 			});
 		}
 
