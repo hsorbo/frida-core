@@ -30,7 +30,7 @@ namespace Frida.Fruity.XPC {
 			});
 		}
 
-		~PairingBrowser () {
+		~DarwinPairingBrowser () {
 			dispatch_queue.dispatch_sync (() => {
 				browse_session.deallocate ();
 				dns_connection.deallocate ();
@@ -45,7 +45,7 @@ namespace Frida.Fruity.XPC {
 			var interface_name_buf = new char[IFNAMSIZ];
 			unowned string interface_name = if_indextoname (interface_index, interface_name_buf);
 
-			var service = new PairingService (service_name, interface_index, interface_name, task_queue);
+			var service = new DarwinPairingService (service_name, interface_index, interface_name, task_queue);
 			current_batch.add (service);
 
 			if ((flags & DNSService.Flags.MoreComing) != 0)
@@ -67,12 +67,12 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private class TaskQueue : Object, DNSServiceProvider {
-			private weak PairingBrowser parent;
+			private weak DarwinPairingBrowser parent;
 
 			private DNSServiceTask? current = null;
 			private Gee.Deque<DNSServiceTask> pending = new Gee.ArrayQueue<DNSServiceTask> ();
 
-			public TaskQueue (PairingBrowser parent) {
+			public TaskQueue (DarwinPairingBrowser parent) {
 				this.parent = parent;
 			}
 
@@ -163,7 +163,7 @@ namespace Frida.Fruity.XPC {
 
 		private DNSServiceProvider dns;
 
-		internal PairingService (string name, uint interface_index, string interface_name, DNSServiceProvider dns) {
+		internal DarwinPairingService (string name, uint interface_index, string interface_name, DNSServiceProvider dns) {
 			Object (
 				name: name,
 				interface_index: interface_index,
@@ -178,11 +178,11 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private class ResolveTask : DNSServiceTask {
-			private weak PairingService parent;
+			private weak DarwinPairingService parent;
 
 			private Gee.List<PairingServiceHost> hosts = new Gee.ArrayList<PairingServiceHost> ();
 
-			public ResolveTask (PairingService parent) {
+			public ResolveTask (DarwinPairingService parent) {
 				this.parent = parent;
 			}
 
@@ -202,7 +202,7 @@ namespace Frida.Fruity.XPC {
 					return;
 				}
 
-				hosts.add (new PairingServiceHost (parent, hosttarget, uint16.from_big_endian (port),
+				hosts.add (new DarwinPairingServiceHost (parent, hosttarget, uint16.from_big_endian (port),
 					new Bytes (txt_record), parent.dns));
 
 				if ((flags & DNSService.Flags.MoreComing) == 0)
@@ -230,7 +230,8 @@ namespace Frida.Fruity.XPC {
 		private PairingService service;
 		private DNSServiceProvider dns;
 
-		internal PairingServiceHost (PairingService service, string name, uint16 port, Bytes txt_record, DNSServiceProvider dns) {
+		internal DarwinPairingServiceHost (PairingService service, string name, uint16 port, Bytes txt_record,
+				DNSServiceProvider dns) {
 			Object (
 				name: name,
 				port: port,
@@ -246,11 +247,11 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private class ResolveTask : DNSServiceTask {
-			private weak PairingServiceHost parent;
+			private weak DarwinPairingServiceHost parent;
 
 			private Gee.List<InetSocketAddress> addresses = new Gee.ArrayList<InetSocketAddress> ();
 
-			public ResolveTask (PairingServiceHost parent) {
+			public ResolveTask (DarwinPairingServiceHost parent) {
 				this.parent = parent;
 			}
 

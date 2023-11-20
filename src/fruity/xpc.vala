@@ -993,6 +993,12 @@ namespace Frida.Fruity.XPC {
 			);
 		}
 
+		static construct {
+			LWIP.Tcp.init (() => {
+				printerr ("init done!\n");
+			});
+		}
+
 		construct {
 			connection_ref.get_conn = conn_ref => {
 				TunnelConnection * self = conn_ref.user_data;

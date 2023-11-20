@@ -526,7 +526,7 @@ remote_sources = socket_sources + fruity_sources + droidy_sources + barebone_sou
 core_sources = base_sources + local_sources + remote_sources + compiler_sources
 
 internal_libs = [base, pipe] + backend_libs
-internal_deps = [base_dep, pipe_dep, libngtcp2_dep, ngtcp2_crypto_quictls_dep, libnghttp2_dep, openssl_dep]
+internal_deps = [base_dep, pipe_dep, libngtcp2_dep, ngtcp2_crypto_quictls_dep, libnghttp2_dep, lwip_dep, openssl_dep]
 
 if host_os_family == 'windows'
   backend_deps += gio_windows_dep
