@@ -954,7 +954,12 @@ namespace Frida.Fruity.XPC {
 		private Source? expiry_timer = null;
 
 		private int64 control_stream_id = -1;
+		private ByteArray control_stream_rx_buf = new ByteArray.sized (128);
 		private ByteArray control_stream_tx_buf = new ByteArray.sized (128);
+
+		private string? local_ipv6_address;
+		private string? local_ipv6_netmask;
+		private LWIP.NetworkInterface netif;
 
 		private Promise<bool> established = new Promise<bool> ();
 
@@ -988,9 +993,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		static construct {
-			LWIP.Tcp.init (() => {
-				printerr ("init done!!\n");
-			});
+			LWIP.Tcp.init (() => {});
 		}
 
 		construct {
@@ -1066,7 +1069,7 @@ namespace Frida.Fruity.XPC {
 
 			var settings = NGTcp2.Settings.make_default ();
 			settings.initial_ts = make_timestamp ();
-			settings.log_printf = (NGTcp2.Printf) on_log_printf;
+			//settings.log_printf = (NGTcp2.Printf) on_log_printf;
 			settings.max_tx_udp_payload_size = MAX_UDP_PAYLOAD_SIZE;
 			settings.handshake_timeout = 5ULL * NGTcp2.SECONDS;
 
@@ -1089,7 +1092,10 @@ namespace Frida.Fruity.XPC {
 
 			yield established.future.wait_async (cancellable);
 
-			connection.open_bidi_stream (out control_stream_id, null);
+			return true;
+		}
+
+		private void on_control_stream_opened () {
 			send_request (Json.to_string (
 				new Json.Builder ()
 				.begin_object ()
@@ -1099,8 +1105,48 @@ namespace Frida.Fruity.XPC {
 					.add_int_value (PREFERRED_MTU)
 				.end_object ()
 				.get_root (), false));
+		}
 
-			return true;
+		private void on_control_stream_response (string json) throws Error {
+			Json.Reader reader;
+			try {
+				reader = new Json.Reader (Json.from_string (json));
+			} catch (GLib.Error e) {
+				throw new Error.PROTOCOL ("Invalid response JSON");
+			}
+
+			reader.read_member ("clientParameters");
+
+			reader.read_member ("address");
+			string? address = reader.get_string_value ();
+			reader.end_member ();
+
+			reader.read_member ("netmask");
+			string? netmask = reader.get_string_value ();
+			reader.end_member ();
+
+			if (address == null || netmask == null)
+				throw new Error.PROTOCOL ("Missing parameters");
+
+			printerr (@"Got address=\"$address\" netmask=\"$netmask\"\n");
+			local_ipv6_address = address;
+			local_ipv6_netmask = netmask;
+
+			LWIP.Tcp.schedule (setup_network_interface);
+		}
+
+		private void setup_network_interface () {
+			LWIP.NetworkInterface.add_noaddr (ref netif, null, on_netif_init, on_netif_input);
+		}
+
+		private static LWIP.Result on_netif_init (LWIP.NetworkInterface netif) {
+			printerr ("on_netif_init()\n");
+			return OK;
+		}
+
+		private static LWIP.Result on_netif_input (void * pbuf, LWIP.NetworkInterface netif) {
+			printerr ("on_netif_input()\n");
+			return OK;
 		}
 
 		public void cancel () {
@@ -1127,6 +1173,31 @@ namespace Frida.Fruity.XPC {
 			control_stream_tx_buf.append (request.get_data ());
 
 			process_pending_writes ();
+		}
+
+		private void on_response_data_available (uint8[] data, out size_t consumed) throws Error {
+			consumed = 0;
+
+			if (data.length < 12)
+				return;
+
+			var buf = new Buffer (new Bytes.static (data), BIG_ENDIAN);
+
+			string magic = buf.read_fixed_string (0, 8);
+			if (magic != "CDTunnel")
+				throw new Error.PROTOCOL ("Invalid magic");
+
+			size_t body_size = buf.read_uint16 (8);
+			size_t body_available = data.length - 10;
+			if (body_available < body_size)
+				return;
+
+			var body = new uint8[body_size + 1];
+			Memory.copy (body, data + 10, body_size);
+
+			on_control_stream_response ((string) body);
+
+			consumed = 10 + body_size;
 		}
 
 		private bool on_socket_readable (DatagramBased datagram_based, IOCondition condition) {
@@ -1269,8 +1340,16 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private int on_extend_max_local_streams_bidi (uint64 max_streams) {
-			if (!established.future.ready)
-				established.resolve (true);
+			if (control_stream_id == -1) {
+				connection.open_bidi_stream (out control_stream_id, null);
+
+				var source = new IdleSource ();
+				source.set_callback (() => {
+					on_control_stream_opened ();
+					return Source.REMOVE;
+				});
+				source.attach (MainContext.get_thread_default ());
+			}
 
 			return 0;
 		}
@@ -1283,7 +1362,18 @@ namespace Frida.Fruity.XPC {
 
 		private int on_recv_stream_data (uint32 flags, int64 stream_id, uint64 offset, uint8[] data) {
 			printerr (@"on_recv_stream_data() flags=$flags stream_id=$stream_id offset=$offset\n");
-			hexdump (data);
+			if (stream_id == control_stream_id) {
+				control_stream_rx_buf.append (data);
+				try {
+					size_t consumed;
+					on_response_data_available (control_stream_rx_buf.data, out consumed);
+					if (consumed != 0)
+						control_stream_rx_buf.remove_range (0, (uint) consumed);
+				} catch (Error e) {
+					if (!established.future.ready)
+						established.reject (e);
+				}
+			}
 
 			return 0;
 		}
