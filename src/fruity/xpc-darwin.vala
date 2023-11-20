@@ -147,28 +147,28 @@ namespace Frida.Fruity.XPC {
 
 	public class DarwinPairingService : Object, PairingService {
 		public string name {
-			get;
-			construct;
+			get { return _name; }
 		}
 
 		public uint interface_index {
-			get;
-			construct;
+			get { return _interface_index; }
 		}
 
 		public string interface_name {
-			get;
-			construct;
+			get { return _interface_name; }
 		}
+
+		private string _name;
+		private uint _interface_index;
+		private string _interface_name;
 
 		private DNSServiceProvider dns;
 
 		internal DarwinPairingService (string name, uint interface_index, string interface_name, DNSServiceProvider dns) {
-			Object (
-				name: name,
-				interface_index: interface_index,
-				interface_name: interface_name
-			);
+			_name = name;
+			_interface_index = interface_index;
+			_interface_name = interface_name;
+
 			this.dns = dns;
 		}
 
@@ -213,30 +213,30 @@ namespace Frida.Fruity.XPC {
 
 	public class DarwinPairingServiceHost : Object, PairingServiceHost {
 		public string name {
-			get;
-			construct;
+			get { return _name; }
 		}
 
 		public uint16 port {
-			get;
-			construct;
+			get { return _port; }
 		}
 
 		public Bytes txt_record {
-			get;
-			construct;
+			get { return _txt_record; }
 		}
+
+		private string _name;
+		private uint16 _port;
+		private Bytes _txt_record;
 
 		private PairingService service;
 		private DNSServiceProvider dns;
 
 		internal DarwinPairingServiceHost (PairingService service, string name, uint16 port, Bytes txt_record,
 				DNSServiceProvider dns) {
-			Object (
-				name: name,
-				port: port,
-				txt_record: txt_record
-			);
+			_name = name;
+			_port = port;
+			_txt_record = txt_record;
+
 			this.service = service;
 			this.dns = dns;
 		}
