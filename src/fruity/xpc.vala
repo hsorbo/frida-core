@@ -961,9 +961,12 @@ namespace Frida.Fruity.XPC {
 		private string? local_ipv6_netmask;
 		private string? remote_ipv6_address;
 		private uint16 remote_rsd_port;
+		private uint16 mtu;
 		private LWIP.NetworkInterface netif;
 
 		private Promise<bool> established = new Promise<bool> ();
+
+		private MainContext main_context;
 
 		private Cancellable io_cancellable = new Cancellable ();
 
@@ -1015,6 +1018,8 @@ namespace Frida.Fruity.XPC {
 			ssl.set_connect_state ();
 			ssl.set_alpn_protos (ALPN.data);
 			ssl.set_quic_transport_version (OpenSSL.TLSExtensionType.quic_transport_parameters);
+
+			main_context = MainContext.ref_thread_default ();
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -1088,7 +1093,7 @@ namespace Frida.Fruity.XPC {
 
 			rx_source = socket.create_source (IOCondition.IN, io_cancellable);
 			rx_source.set_callback (on_socket_readable);
-			rx_source.attach (MainContext.get_thread_default ());
+			rx_source.attach (main_context);
 
 			process_pending_writes ();
 
@@ -1127,6 +1132,10 @@ namespace Frida.Fruity.XPC {
 			string? netmask = reader.get_string_value ();
 			reader.end_member ();
 
+			reader.read_member ("mtu");
+			int64 raw_mtu = reader.get_int_value ();
+			reader.end_member ();
+
 			reader.end_member ();
 
 			reader.read_member ("serverAddress");
@@ -1137,8 +1146,9 @@ namespace Frida.Fruity.XPC {
 			int64 server_rsd_port = reader.get_int_value ();
 			reader.end_member ();
 
-			if (address == null || netmask == null || server_address == null || server_rsd_port == 0)
-				throw new Error.PROTOCOL ("Missing parameters");
+			GLib.Error? error = reader.get_error ();
+			if (error != null)
+				throw new Error.PROTOCOL ("Invalid response: %s", error.message);
 
 			printerr ("%s\n", json);
 
@@ -1147,6 +1157,7 @@ namespace Frida.Fruity.XPC {
 			local_ipv6_netmask = netmask;
 			remote_ipv6_address = server_address;
 			remote_rsd_port = (uint16) server_rsd_port;
+			mtu = (uint16) raw_mtu;
 
 			LWIP.Runtime.schedule (setup_network_interface);
 		}
@@ -1155,28 +1166,54 @@ namespace Frida.Fruity.XPC {
 			LWIP.NetworkInterface.add_noaddr (ref netif, this, on_netif_init, on_netif_input);
 
 			var pcb = new LWIP.TcpPcb (V6);
-			printerr ("allocated tcp_pcb %p\n", pcb);
 			pcb.bind_netif (netif);
 
-			var addr = LWIP.IPAddress ();
-			addr.ip6 = LWIP.IP6Address.parse (remote_ipv6_address);
-			addr.type = V6;
+			var addr = LWIP.IP6Address.parse (remote_ipv6_address);
 			var res = pcb.connect (addr, remote_rsd_port, on_tcp_pcb_connected);
 			printerr ("tcp_connect() => %d\n", res);
 		}
 
 		private static LWIP.Result on_netif_init (LWIP.NetworkInterface netif) {
-			printerr ("on_netif_init()\n");
 			TunnelConnection * self = netif.state;
 
-			netif.add_ip6_address (LWIP.IP6Address.parse (self->local_ipv6_address));
+			netif.mtu = self->mtu;
+			netif.output_ip6 = on_netif_output_ip6;
+
+			int8 chosen_index = -1;
+			netif.add_ip6_address (LWIP.IP6Address.parse (self->local_ipv6_address), &chosen_index);
+			netif.ip6_addr_set_state (chosen_index, PREFERRED);
 
 			return OK;
 		}
 
-		private static LWIP.Result on_netif_input (void * pbuf, LWIP.NetworkInterface netif) {
+		private static LWIP.Result on_netif_input (LWIP.PacketBuffer pbuf, LWIP.NetworkInterface netif) {
 			printerr ("on_netif_input()\n");
 			return OK;
+		}
+
+		private static LWIP.Result on_netif_output_ip6 (LWIP.NetworkInterface netif, LWIP.PacketBuffer pbuf,
+				LWIP.IP6Address address) {
+			TunnelConnection * self = netif.state;
+
+			printerr ("on_netif_output_ip6() tot_len=%u\n", pbuf.tot_len);
+
+			var buffer = new uint8[pbuf.tot_len];
+			unowned uint8[] packet = pbuf.get_contiguous (buffer, pbuf.tot_len);
+			uint8[] packet_copy = packet[:pbuf.tot_len];
+
+			var source = new IdleSource ();
+			source.set_callback (() => {
+				self->send_packet (packet_copy);
+				return Source.REMOVE;
+			});
+			source.attach (self->main_context);
+
+			return OK;
+		}
+
+		private void send_packet (uint8[] packet) {
+			printerr ("send_packet(): TODO!\n");
+			hexdump (packet);
 		}
 
 		private static LWIP.Result on_tcp_pcb_connected (void * arg, LWIP.TcpPcb pcb, LWIP.Result res) {
@@ -1345,7 +1382,7 @@ namespace Frida.Fruity.XPC {
 
 			var source = new TimeoutSource (delta_msec);
 			source.set_callback (on_expiry);
-			source.attach (MainContext.get_thread_default ());
+			source.attach (main_context);
 			expiry_timer = source;
 		}
 
@@ -1383,7 +1420,7 @@ namespace Frida.Fruity.XPC {
 					on_control_stream_opened ();
 					return Source.REMOVE;
 				});
-				source.attach (MainContext.get_thread_default ());
+				source.attach (main_context);
 			}
 
 			return 0;
