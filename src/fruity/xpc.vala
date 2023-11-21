@@ -941,22 +941,9 @@ namespace Frida.Fruity.XPC {
 			construct;
 		}
 
-		private Socket socket;
-		private uint8[] raw_local_address;
-		private NGTcp2.Connection connection;
-		private NGTcp2.Crypto.ConnectionRef connection_ref;
-		private OpenSSL.SSLContext ssl_ctx;
-		private OpenSSL.SSL ssl;
+		private Promise<bool> established = new Promise<bool> ();
 
-		private SocketSource? rx_source;
-		private uint8[] rx_buf = new uint8[MAX_UDP_PAYLOAD_SIZE];
-		private uint8[] tx_buf = new uint8[MAX_UDP_PAYLOAD_SIZE];
-		private Source? expiry_timer = null;
-
-		private int64 control_stream_id = -1;
-		private ByteArray control_stream_rx_buf = new ByteArray.sized (128);
-		private ByteArray control_stream_tx_buf = new ByteArray.sized (128);
-
+		private Stream? control_stream;
 		private string? local_ipv6_address;
 		private string? local_ipv6_netmask;
 		private string? remote_ipv6_address;
@@ -964,7 +951,21 @@ namespace Frida.Fruity.XPC {
 		private uint16 mtu;
 		private LWIP.NetworkInterface netif;
 
-		private Promise<bool> established = new Promise<bool> ();
+		private Gee.Map<int64?, Stream> streams = new Gee.HashMap<int64?, Stream> (Numeric.int64_hash, Numeric.int64_equal);
+		private Gee.Queue<Bytes> pending_datagrams = new Gee.ArrayQueue<Bytes> ();
+
+		private SocketSource? rx_source;
+		private uint8[] rx_buf = new uint8[MAX_UDP_PAYLOAD_SIZE];
+		private uint8[] tx_buf = new uint8[MAX_UDP_PAYLOAD_SIZE];
+		private Source? write_idle;
+		private Source? expiry_timer;
+
+		private Socket socket;
+		private uint8[] raw_local_address;
+		private NGTcp2.Connection connection;
+		private NGTcp2.Crypto.ConnectionRef connection_ref;
+		private OpenSSL.SSLContext ssl_ctx;
+		private OpenSSL.SSL ssl;
 
 		private MainContext main_context;
 
@@ -1103,6 +1104,9 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private void on_control_stream_opened () {
+			var zeroed_padding_packet = new uint8[1024];
+			send_datagram (new Bytes.take ((owned) zeroed_padding_packet));
+
 			send_request (Json.to_string (
 				new Json.Builder ()
 				.begin_object ()
@@ -1199,21 +1203,16 @@ namespace Frida.Fruity.XPC {
 
 			var buffer = new uint8[pbuf.tot_len];
 			unowned uint8[] packet = pbuf.get_contiguous (buffer, pbuf.tot_len);
-			uint8[] packet_copy = packet[:pbuf.tot_len];
+			var datagram = new Bytes (packet[:pbuf.tot_len]);
 
 			var source = new IdleSource ();
 			source.set_callback (() => {
-				self->send_packet (packet_copy);
+				self->send_datagram (datagram);
 				return Source.REMOVE;
 			});
 			source.attach (self->main_context);
 
 			return OK;
-		}
-
-		private void send_packet (uint8[] packet) {
-			printerr ("send_packet(): TODO!\n");
-			hexdump (packet);
 		}
 
 		private static LWIP.Result on_tcp_pcb_connected (void * arg, LWIP.TcpPcb pcb, LWIP.Result res) {
@@ -1242,12 +1241,15 @@ namespace Frida.Fruity.XPC {
 				.append_uint16 ((uint16) body.length)
 				.append_data (body)
 				.build ();
-			control_stream_tx_buf.append (request.get_data ());
-
-			process_pending_writes ();
+			control_stream.send (request.get_data ());
 		}
 
-		private void on_response_data_available (uint8[] data, out size_t consumed) throws Error {
+		private void on_stream_data_available (Stream stream, uint8[] data, out size_t consumed) {
+			if (stream != control_stream) {
+				consumed = data.length;
+				return;
+			}
+
 			consumed = 0;
 
 			if (data.length < 12)
@@ -1255,21 +1257,34 @@ namespace Frida.Fruity.XPC {
 
 			var buf = new Buffer (new Bytes.static (data), BIG_ENDIAN);
 
-			string magic = buf.read_fixed_string (0, 8);
-			if (magic != "CDTunnel")
-				throw new Error.PROTOCOL ("Invalid magic");
+			try {
+				string magic = buf.read_fixed_string (0, 8);
+				if (magic != "CDTunnel")
+					throw new Error.PROTOCOL ("Invalid magic");
 
-			size_t body_size = buf.read_uint16 (8);
-			size_t body_available = data.length - 10;
-			if (body_available < body_size)
-				return;
+				size_t body_size = buf.read_uint16 (8);
+				size_t body_available = data.length - 10;
+				if (body_available < body_size)
+					return;
 
-			var body = new uint8[body_size + 1];
-			Memory.copy (body, data + 10, body_size);
+				var body = new uint8[body_size + 1];
+				Memory.copy (body, data + 10, body_size);
 
-			on_control_stream_response ((string) body);
+				on_control_stream_response ((string) body);
 
-			consumed = 10 + body_size;
+				consumed = 10 + body_size;
+			} catch (Error e) {
+				if (!established.future.ready)
+					established.reject (e);
+			}
+		}
+
+		private void send_datagram (Bytes datagram) {
+			printerr ("send_datagram()\n");
+			hexdump (datagram.get_data ());
+
+			pending_datagrams.offer (datagram);
+			process_pending_writes ();
 		}
 
 		private bool on_socket_readable (DatagramBased datagram_based, IOCondition condition) {
@@ -1298,10 +1313,21 @@ namespace Frida.Fruity.XPC {
 			return Source.CONTINUE;
 		}
 
-		// TODO: Refactor this:
-		private bool is_first_write = true;
-
 		private void process_pending_writes () {
+			if (write_idle != null)
+				return;
+
+			var source = new IdleSource ();
+			source.set_callback (() => {
+				write_idle = null;
+				do_process_pending_writes ();
+				return Source.REMOVE;
+			});
+			source.attach (main_context);
+			write_idle = source;
+		}
+
+		private void do_process_pending_writes () {
 			var ts = make_timestamp ();
 
 			var pi = NGTcp2.PacketInfo ();
@@ -1386,10 +1412,6 @@ namespace Frida.Fruity.XPC {
 			expiry_timer = source;
 		}
 
-		private void advance_control_stream_tx_cursor (size_t n) {
-			control_stream_tx_buf.remove_range (0, (uint) n);
-		}
-
 		private bool on_expiry () {
 			int res = connection.handle_expiry (make_timestamp ());
 			if (res != 0) {
@@ -1412,8 +1434,8 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private int on_extend_max_local_streams_bidi (uint64 max_streams) {
-			if (control_stream_id == -1) {
-				connection.open_bidi_stream (out control_stream_id, null);
+			if (control_stream == null) {
+				control_stream = open_bidi_stream ();
 
 				var source = new IdleSource ();
 				source.set_callback (() => {
@@ -1434,18 +1456,9 @@ namespace Frida.Fruity.XPC {
 
 		private int on_recv_stream_data (uint32 flags, int64 stream_id, uint64 offset, uint8[] data) {
 			printerr (@"on_recv_stream_data() flags=$flags stream_id=$stream_id offset=$offset\n");
-			if (stream_id == control_stream_id) {
-				control_stream_rx_buf.append (data);
-				try {
-					size_t consumed;
-					on_response_data_available (control_stream_rx_buf.data, out consumed);
-					if (consumed != 0)
-						control_stream_rx_buf.remove_range (0, (uint) consumed);
-				} catch (Error e) {
-					if (!established.future.ready)
-						established.reject (e);
-				}
-			}
+			Stream? stream = streams[stream_id];
+			if (stream != null)
+				stream.on_recv (data);
 
 			return 0;
 		}
@@ -1504,6 +1517,49 @@ namespace Frida.Fruity.XPC {
 			cert.sign_ctx (mc);
 
 			return cert;
+		}
+
+		private Stream open_bidi_stream () {
+			int64 id;
+			connection.open_bidi_stream (out id, null);
+
+			var stream = new Stream (this, id);
+			streams[id] = stream;
+
+			return stream;
+		}
+
+		private class Stream {
+			public int64 id;
+
+			private weak TunnelConnection parent;
+
+			public ByteArray rx_buf = new ByteArray.sized (128);
+			public ByteArray tx_buf = new ByteArray.sized (128);
+
+			public Stream (TunnelConnection parent, int64 id) {
+				this.parent = parent;
+				this.id = id;
+			}
+
+			public void send (uint8[] data) {
+				tx_buf.append (data);
+				parent.process_pending_writes ();
+			}
+
+			public void advance_tx_cursor (size_t n) {
+				tx_buf.remove_range (0, (uint) n);
+			}
+
+			public void on_recv (uint8[] data) {
+				rx_buf.append (data);
+
+				size_t consumed;
+				parent.on_stream_data_available (this, rx_buf.data, out consumed);
+
+				if (consumed != 0)
+					rx_buf.remove_range (0, (uint) consumed);
+			}
 		}
 	}
 
