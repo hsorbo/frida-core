@@ -17,12 +17,19 @@ namespace LWIP {
 	[CCode (cheader_filename = "lwip/netif.h", cname = "struct netif", cprefix = "netif_")]
 	public struct NetworkInterface {
 		public static void add_noaddr (ref NetworkInterface netif, void * state, NetworkInterfaceInitFunc init,
-			NetworkInterfaceInputFunc input);
+			NetworkInterfaceInputFunc input = NetworkInterface.default_input_handler);
+
+		public void set_up ();
+		public void set_down ();
 
 		public void ip6_addr_set (int8 addr_idx, IP6Address address);
 		public Result add_ip6_address (IP6Address address, int8 * chosen_index = null);
 		public void ip6_addr_set_state (int8 addr_index, IP6AddressState state);
 
+		[CCode (cname = "netif_input")]
+		public static Result default_input_handler (PacketBuffer pbuf, NetworkInterface netif);
+
+		public NetworkInterfaceInputFunc input;
 		public NetworkInterfaceOutputIP6Func output_ip6;
 
 		public void * state;
@@ -73,6 +80,8 @@ namespace LWIP {
 	[Compact]
 	[CCode (cheader_filename = "lwip/pbuf.h", cname = "struct pbuf", cprefix = "pbuf_", free_function = "")]
 	public class PacketBuffer {
+		public static PacketBuffer alloc (Layer layer, uint16 length, Type type);
+
 		public PacketBuffer next;
 		[CCode (array_length_cname = "len")]
 		public uint8[] payload;
@@ -80,6 +89,25 @@ namespace LWIP {
 
 		[CCode (array_length = false)]
 		public unowned uint8[] get_contiguous (uint8[] buffer, uint16 len, uint16 offset = 0);
+
+		public Result take (uint8[] data);
+
+		[CCode (cname = "pbuf_layer", cprefix = "PBUF_", has_type_id = false)]
+		public enum Layer {
+			TRANSPORT,
+			IP,
+			LINK,
+			RAW_TX,
+			RAW,
+		}
+
+		[CCode (cname = "pbuf_type", cprefix = "PBUF_", has_type_id = false)]
+		public enum Type {
+			RAM,
+			ROM,
+			REF,
+			POOL,
+		}
 	}
 
 	[Compact]

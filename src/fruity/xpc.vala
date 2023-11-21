@@ -952,7 +952,8 @@ namespace Frida.Fruity.XPC {
 		private LWIP.NetworkInterface netif;
 
 		private Gee.Map<int64?, Stream> streams = new Gee.HashMap<int64?, Stream> (Numeric.int64_hash, Numeric.int64_equal);
-		private Gee.Queue<Bytes> pending_datagrams = new Gee.ArrayQueue<Bytes> ();
+		private Gee.Queue<Bytes> rx_datagrams = new Gee.ArrayQueue<Bytes> ();
+		private Gee.Queue<Bytes> tx_datagrams = new Gee.ArrayQueue<Bytes> ();
 
 		private SocketSource? rx_source;
 		private uint8[] rx_buf = new uint8[MAX_UDP_PAYLOAD_SIZE];
@@ -1167,7 +1168,8 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private void setup_network_interface () {
-			LWIP.NetworkInterface.add_noaddr (ref netif, this, on_netif_init, on_netif_input);
+			LWIP.NetworkInterface.add_noaddr (ref netif, this, on_netif_init);
+			netif.set_up ();
 
 			var pcb = new LWIP.TcpPcb (V6);
 			pcb.bind_netif (netif);
@@ -1187,11 +1189,6 @@ namespace Frida.Fruity.XPC {
 			netif.add_ip6_address (LWIP.IP6Address.parse (self->local_ipv6_address), &chosen_index);
 			netif.ip6_addr_set_state (chosen_index, PREFERRED);
 
-			return OK;
-		}
-
-		private static LWIP.Result on_netif_input (LWIP.PacketBuffer pbuf, LWIP.NetworkInterface netif) {
-			printerr ("on_netif_input()\n");
 			return OK;
 		}
 
@@ -1283,7 +1280,7 @@ namespace Frida.Fruity.XPC {
 			printerr ("send_datagram()\n");
 			hexdump (datagram.get_data ());
 
-			pending_datagrams.offer (datagram);
+			tx_datagrams.offer (datagram);
 			process_pending_writes ();
 		}
 
@@ -1335,13 +1332,13 @@ namespace Frida.Fruity.XPC {
 			while (true) {
 				ssize_t n = -1;
 
-				Bytes? datagram = pending_datagrams.peek ();
+				Bytes? datagram = tx_datagrams.peek ();
 				if (datagram != null) {
 					int accepted = -1;
 					n = connection.write_datagram (null, null, tx_buf, &accepted, NGTcp2.WriteStreamFlags.MORE, 0,
 						datagram.get_data (), ts);
 					if (accepted > 0)
-						pending_datagrams.poll ();
+						tx_datagrams.poll ();
 				} else {
 					Stream? stream = null;
 					unowned uint8[]? data = null;
@@ -1461,7 +1458,25 @@ namespace Frida.Fruity.XPC {
 			printerr (@"on_recv_datagram() flags=$flags\n");
 			hexdump (data);
 
+			if (local_ipv6_address != null) {
+				lock (rx_datagrams)
+					rx_datagrams.offer (new Bytes (data));
+				LWIP.Runtime.schedule (process_next_rx_datagram);
+			}
+
 			return 0;
+		}
+
+		private void process_next_rx_datagram () {
+			Bytes datagram;
+			lock (rx_datagrams)
+				datagram = rx_datagrams.poll ();
+
+			var pbuf = LWIP.PacketBuffer.alloc (RAW, (uint16) datagram.get_size (), POOL);
+			pbuf.take (datagram.get_data ());
+
+			var res = netif.input (pbuf, netif);
+			printerr ("netif.input() => %d\n", res);
 		}
 
 		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
