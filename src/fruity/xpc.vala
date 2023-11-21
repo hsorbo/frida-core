@@ -1331,6 +1331,7 @@ namespace Frida.Fruity.XPC {
 			var ts = make_timestamp ();
 
 			var pi = NGTcp2.PacketInfo ();
+			Gee.Iterator<Stream> stream_iter = streams.values.iterator ();
 			while (true) {
 				ssize_t n = -1;
 				ssize_t datalen = 0;
@@ -1338,20 +1339,24 @@ namespace Frida.Fruity.XPC {
 				int64 stream_id = -1;
 				unowned uint8[]? data = null;
 				uint64 data_left = 0;
-				bool skip_write_stream = false;
-				if (control_stream_id != -1 && control_stream_tx_buf.len != 0 &&
-						(data_left = connection.get_max_stream_data_left (control_stream_id)) != 0) {
-					if (is_first_write) {
-						int accepted = -1;
-						var zeroed_padding_packet = new uint8[1024];
-						n = connection.write_datagram (null, null, tx_buf, &accepted, NGTcp2.WriteStreamFlags.MORE,
-							1, zeroed_padding_packet, ts);
-						datalen = accepted;
-						skip_write_stream = true;
-						is_first_write = false;
-					} else {
-						stream_id = control_stream_id;
-						data = control_stream_tx_buf.data[:(int) uint64.min ((uint64) control_stream_tx_buf.len, data_left)];
+
+				Bytes? datagram = pending_datagrams.peek ();
+				if (datagram != null) {
+					int accepted = -1;
+					n = connection.write_datagram (null, null, tx_buf, &accepted, NGTcp2.WriteStreamFlags.MORE,
+						0, datagram.get_data (), ts);
+					if (accepted != 0)
+						pending_datagrams.poll ();
+					datalen = accepted;
+				} else {
+					while (stream_iter.next ()) {
+						Stream s = stream_iter.get ();
+						uint64 data_left;
+						if (s.tx_buf.len != 0 && (data_left = connection.get_max_stream_data_left (s.id)) != 0) {
+							stream_id = s.id;
+							data = s.tx_buf.data[:(int) uint64.min ((uint64) s.tx_buf.len, data_left)];
+							break;
+						}
 					}
 				}
 
