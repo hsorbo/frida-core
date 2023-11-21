@@ -18,28 +18,49 @@ namespace LWIP {
 	public struct NetworkInterface {
 		public static void add_noaddr (ref NetworkInterface netif, void * state, NetworkInterfaceInitFunc init,
 			NetworkInterfaceInputFunc input);
-		public Result add_ip6_address (IP6Address addr, int8 * chosen_idx = null);
+
+		public void ip6_addr_set (int8 addr_idx, IP6Address address);
+		public Result add_ip6_address (IP6Address address, int8 * chosen_index = null);
+		public void ip6_addr_set_state (int8 addr_index, IP6AddressState state);
+
+		public NetworkInterfaceOutputIP6Func output_ip6;
 
 		public void * state;
+
+		public uint16 mtu;
 	}
 
 	[CCode (cname = "netif_init_fn", has_target = false)]
 	public delegate Result NetworkInterfaceInitFunc (NetworkInterface netif);
 
 	[CCode (cname = "netif_input_fn", has_target = false)]
-	public delegate Result NetworkInterfaceInputFunc (void * pbuf, NetworkInterface netif);
+	public delegate Result NetworkInterfaceInputFunc (PacketBuffer pbuf, NetworkInterface netif);
 
-	[CCode (cheader_filename = "lwip/ip_addr.h", cname = "ip_addr_t", cprefix = "ip_addr_")]
-	public struct IPAddress {
-		[CCode (cname = "u_addr.ip6")]
-		public IP6Address ip6;
-		public IPAddressType type;
-	}
+	[CCode (cname = "netif_output_ip6_fn", has_target = false)]
+	public delegate Result NetworkInterfaceOutputIP6Func (NetworkInterface netif, PacketBuffer pbuf, IP6Address address);
 
 	[CCode (cheader_filename = "lwip/ip6_addr.h", cname = "ip6_addr_t", cprefix = "ip6_addr_")]
 	public struct IP6Address {
 		[CCode (cname = "ip6addr_aton")]
 		public static IP6Address parse (string str);
+	}
+
+	[Flags]
+	[CCode (cheader_filename = "lwip/ip6_addr.h", cname = "u8_t", cprefix = "IP6_ADDR_", has_type_id = false)]
+	public enum IP6AddressState {
+		INVALID,
+		TENTATIVE,
+		TENTATIVE_1,
+		TENTATIVE_2,
+		TENTATIVE_3,
+		TENTATIVE_4,
+		TENTATIVE_5,
+		TENTATIVE_6,
+		TENTATIVE_7,
+		VALID,
+		PREFERRED,
+		DEPRECATED,
+		DUPLICATED,
 	}
 
 	[CCode (cheader_filename = "lwip/ip_addr.h", cname = "u8_t", cprefix = "IPADDR_TYPE_", has_type_id = false)]
@@ -50,6 +71,18 @@ namespace LWIP {
 	}
 
 	[Compact]
+	[CCode (cheader_filename = "lwip/pbuf.h", cname = "struct pbuf", cprefix = "pbuf_", free_function = "")]
+	public class PacketBuffer {
+		public PacketBuffer next;
+		[CCode (array_length_cname = "len")]
+		public uint8[] payload;
+		public uint16 tot_len;
+
+		[CCode (array_length = false)]
+		public unowned uint8[] get_contiguous (uint8[] buffer, uint16 len, uint16 offset = 0);
+	}
+
+	[Compact]
 	[CCode (cheader_filename = "lwip/tcp.h", cname = "struct tcp_pcb", cprefix = "tcp_", free_function = "")]
 	public class TcpPcb {
 		[CCode (cname = "tcp_new_ip_type")]
@@ -57,7 +90,7 @@ namespace LWIP {
 
 		public void bind_netif (NetworkInterface? netif);
 
-		public Result connect (IPAddress address, uint16 port, ConnectedFunc connected);
+		public Result connect (IP6Address address, uint16 port, ConnectedFunc connected);
 
 		[CCode (cname = "tcp_connected_fn", has_target = false)]
 		public delegate Result ConnectedFunc (void * arg, TcpPcb pcb, Result res);
