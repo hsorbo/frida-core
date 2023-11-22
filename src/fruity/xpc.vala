@@ -145,8 +145,6 @@ namespace Frida.Fruity.XPC {
 		public uint16 port;
 	}
 
-	private TunnelConnection tunnel_connection_todo;
-
 	public class TunnelService : Object, AsyncInitable {
 		public IOStream stream {
 			get;
@@ -228,7 +226,7 @@ namespace Frida.Fruity.XPC {
 			connection.cancel ();
 		}
 
-		public async void create_listener (string device_address, Cancellable? cancellable = null) throws Error, IOError {
+		public async TunnelConnection establish (string device_address, Cancellable? cancellable = null) throws Error, IOError {
 			Key local_keypair = make_rsa_keypair ();
 
 			string request = Json.to_string (
@@ -277,12 +275,11 @@ namespace Frida.Fruity.XPC {
 
 			Key remote_pubkey = key_from_der (Base64.decode (device_pubkey));
 
-			tunnel_connection_todo =
-				yield TunnelConnection.open (
-					new InetSocketAddress.from_string (device_address, port),
-					new TunnelKey ((owned) local_keypair),
-					new TunnelKey ((owned) remote_pubkey),
-					cancellable);
+			return yield TunnelConnection.open (
+				new InetSocketAddress.from_string (device_address, port),
+				new TunnelKey ((owned) local_keypair),
+				new TunnelKey ((owned) remote_pubkey),
+				cancellable);
 		}
 
 		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
@@ -925,7 +922,7 @@ namespace Frida.Fruity.XPC {
 		SIGNATURE	= 10,
 	}
 
-	private sealed class TunnelConnection : Object, AsyncInitable {
+	public sealed class TunnelConnection : Object, AsyncInitable {
 		public InetSocketAddress address {
 			get;
 			construct;
@@ -941,13 +938,19 @@ namespace Frida.Fruity.XPC {
 			construct;
 		}
 
+		public uint16 remote_rsd_port {
+			get {
+				return _remote_rsd_port;
+			}
+		}
+
 		private Promise<bool> established = new Promise<bool> ();
 
 		private Stream? control_stream;
 		private string? local_ipv6_address;
 		private string? local_ipv6_netmask;
 		private string? remote_ipv6_address;
-		private uint16 remote_rsd_port;
+		private uint16 _remote_rsd_port;
 		private uint16 mtu;
 		private LWIP.NetworkInterface netif;
 
@@ -1155,31 +1158,27 @@ namespace Frida.Fruity.XPC {
 			if (error != null)
 				throw new Error.PROTOCOL ("Invalid response: %s", error.message);
 
-			printerr ("%s\n", json);
-
-			printerr (@"Got address=\"$address\" netmask=\"$netmask\" server_address=\"$server_address\" server_rsd_port=$server_rsd_port\n");
 			local_ipv6_address = address;
 			local_ipv6_netmask = netmask;
 			remote_ipv6_address = server_address;
-			remote_rsd_port = (uint16) server_rsd_port;
+			_remote_rsd_port = (uint16) server_rsd_port;
 			mtu = (uint16) raw_mtu;
 
 			LWIP.Runtime.schedule (setup_network_interface);
+
+			established.resolve (true);
 		}
 
 		private void setup_network_interface () {
 			LWIP.NetworkInterface.add_noaddr (ref netif, this, on_netif_init);
 			netif.set_up ();
-
-			var pcb = new LWIP.TcpPcb (V6);
-			pcb.bind_netif (netif);
-
-			var addr = LWIP.IP6Address.parse (remote_ipv6_address);
-			var res = pcb.connect (addr, remote_rsd_port, on_tcp_pcb_connected);
-			printerr ("tcp_connect() => %d\n", res);
 		}
 
-		private static LWIP.Result on_netif_init (LWIP.NetworkInterface netif) {
+		public async IOStream open_connection (uint16 port, Cancellable? cancellable = null) throws Error, IOError {
+			return yield TcpConnection.open (this, remote_ipv6_address, port, cancellable);
+		}
+
+		private static LWIP.ErrorCode on_netif_init (LWIP.NetworkInterface netif) {
 			TunnelConnection * self = netif.state;
 
 			netif.mtu = self->mtu;
@@ -1192,11 +1191,9 @@ namespace Frida.Fruity.XPC {
 			return OK;
 		}
 
-		private static LWIP.Result on_netif_output_ip6 (LWIP.NetworkInterface netif, LWIP.PacketBuffer pbuf,
+		private static LWIP.ErrorCode on_netif_output_ip6 (LWIP.NetworkInterface netif, LWIP.PacketBuffer pbuf,
 				LWIP.IP6Address address) {
 			TunnelConnection * self = netif.state;
-
-			printerr ("on_netif_output_ip6() tot_len=%u\n", pbuf.tot_len);
 
 			var buffer = new uint8[pbuf.tot_len];
 			unowned uint8[] packet = pbuf.get_contiguous (buffer, pbuf.tot_len);
@@ -1209,11 +1206,6 @@ namespace Frida.Fruity.XPC {
 			});
 			source.attach (self->main_context);
 
-			return OK;
-		}
-
-		private static LWIP.Result on_tcp_pcb_connected (void * arg, LWIP.TcpPcb pcb, LWIP.Result res) {
-			printerr ("on_tcp_pcb_connected()\n");
 			return OK;
 		}
 
@@ -1242,7 +1234,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private void on_stream_data_available (Stream stream, uint8[] data, out size_t consumed) {
-			if (stream != control_stream) {
+			if (stream != control_stream || established.future.ready) {
 				consumed = data.length;
 				return;
 			}
@@ -1277,9 +1269,6 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private void send_datagram (Bytes datagram) {
-			printerr ("send_datagram()\n");
-			hexdump (datagram.get_data ());
-
 			tx_datagrams.offer (datagram);
 			process_pending_writes ();
 		}
@@ -1446,7 +1435,6 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private int on_recv_stream_data (uint32 flags, int64 stream_id, uint64 offset, uint8[] data) {
-			printerr (@"on_recv_stream_data() flags=$flags stream_id=$stream_id offset=$offset\n");
 			Stream? stream = streams[stream_id];
 			if (stream != null)
 				stream.on_recv (data);
@@ -1455,9 +1443,6 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private int on_recv_datagram (uint32 flags, uint8[] data) {
-			printerr (@"on_recv_datagram() flags=$flags\n");
-			hexdump (data);
-
 			if (local_ipv6_address != null) {
 				lock (rx_datagrams)
 					rx_datagrams.offer (new Bytes (data));
@@ -1475,8 +1460,7 @@ namespace Frida.Fruity.XPC {
 			var pbuf = LWIP.PacketBuffer.alloc (RAW, (uint16) datagram.get_size (), POOL);
 			pbuf.take (datagram.get_data ());
 
-			var res = netif.input (pbuf, netif);
-			printerr ("netif.input() => %d\n", res);
+			netif.input (pbuf, netif);
 		}
 
 		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
@@ -1543,7 +1527,7 @@ namespace Frida.Fruity.XPC {
 
 			private weak TunnelConnection parent;
 
-			public ByteArray rx_buf = new ByteArray.sized (128);
+			public ByteArray rx_buf = new ByteArray.sized (256);
 			public ByteArray tx_buf = new ByteArray.sized (128);
 
 			public Stream (TunnelConnection parent, int64 id) {
@@ -1566,9 +1550,443 @@ namespace Frida.Fruity.XPC {
 					rx_buf.remove_range (0, (uint) consumed);
 			}
 		}
+
+		private class TcpConnection : IOStream, AsyncInitable {
+			public TunnelConnection tunnel_connection {
+				get;
+				construct;
+			}
+
+			public string address {
+				get;
+				construct;
+			}
+
+			public uint16 port {
+				get;
+				construct;
+			}
+
+			public State state {
+				get {
+					return _state;
+				}
+			}
+
+			public override InputStream input_stream {
+				get {
+					return _input_stream;
+				}
+			}
+
+			public override OutputStream output_stream {
+				get {
+					return _output_stream;
+				}
+			}
+
+			public IOCondition pending_io {
+				get {
+					lock (state)
+						return events;
+				}
+			}
+
+			private Promise<bool> established = new Promise<bool> ();
+
+			private State _state = CREATED;
+			private TcpInputStream _input_stream;
+			private TcpOutputStream _output_stream;
+
+			private LWIP.TcpPcb pcb;
+			private IOCondition events = 0;
+			private ByteArray rx_buf = new ByteArray.sized (2048);
+			private ByteArray tx_buf = new ByteArray.sized (2048);
+			private size_t rx_bytes_to_acknowledge = 0;
+			private size_t tx_space_available = 0;
+
+			private Gee.Map<unowned Source, IOCondition> sources = new Gee.HashMap<unowned Source, IOCondition> ();
+
+			private MainContext main_context;
+
+			private Cancellable io_cancellable = new Cancellable ();
+
+			public enum State {
+				CREATED,
+				OPENING,
+				OPENED,
+				CLOSED
+			}
+
+			public static async TcpConnection open (TunnelConnection tunnel_connection, string address, uint16 port,
+					Cancellable? cancellable) throws Error, IOError {
+				var connection = new TcpConnection (tunnel_connection, address, port);
+
+				try {
+					yield connection.init_async (Priority.DEFAULT, cancellable);
+				} catch (GLib.Error e) {
+					throw_api_error (e);
+				}
+
+				return connection;
+			}
+
+			private TcpConnection (TunnelConnection tunnel_connection, string address, uint16 port) {
+				Object (
+					tunnel_connection: tunnel_connection,
+					address: address,
+					port: port
+				);
+			}
+
+			construct {
+				_input_stream = new TcpInputStream (this);
+				_output_stream = new TcpOutputStream (this);
+
+				main_context = MainContext.ref_thread_default ();
+			}
+
+			private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
+				_state = OPENING;
+				LWIP.Runtime.schedule (start);
+
+				yield established.future.wait_async (cancellable);
+
+				return true;
+			}
+
+			private void start () {
+				pcb = new LWIP.TcpPcb (V6);
+				pcb.set_user_data (this);
+				pcb.set_recv_callback ((user_data, pcb, pbuf, err) => {
+					TcpConnection * self = user_data;
+					self->on_recv (pbuf);
+					return OK;
+				});
+				pcb.set_error_callback ((user_data, err) => {
+					TcpConnection * self = user_data;
+					self->on_error (err);
+				});
+				pcb.nagle_disable ();
+				pcb.bind_netif (tunnel_connection.netif);
+
+				pcb.connect (LWIP.IP6Address.parse (address), port, (user_data, pcb, err) => {
+					TcpConnection * self = user_data;
+					self->on_connect ();
+					return OK;
+				});
+			}
+
+			private void on_connect () {
+				lock (state)
+					tx_space_available = pcb.query_available_send_buffer_space ();
+				update_events ();
+
+				schedule_on_frida_thread (() => {
+					_state = OPENED;
+
+					if (!established.future.ready)
+						established.resolve (true);
+
+					return Source.REMOVE;
+				});
+			}
+
+			private void on_recv (LWIP.PacketBuffer? pbuf) {
+				if (pbuf == null) {
+					schedule_on_frida_thread (() => {
+						_state = CLOSED;
+						update_events ();
+						return Source.REMOVE;
+					});
+					return;
+				}
+
+				var buffer = new uint8[pbuf.tot_len];
+				unowned uint8[] chunk = pbuf.get_contiguous (buffer, pbuf.tot_len);
+				lock (state)
+					rx_buf.append (chunk[:pbuf.tot_len]);
+				update_events ();
+			}
+
+			private void on_error (LWIP.ErrorCode err) {
+				schedule_on_frida_thread (() => {
+					_state = CLOSED;
+					update_events ();
+
+					if (!established.future.ready)
+						established.reject (new Error.TRANSPORT ("%s", strerror (err.to_errno ())));
+
+					return Source.REMOVE;
+				});
+			}
+
+			public override bool close (GLib.Cancellable? cancellable) throws IOError {
+				do_close ();
+				return true;
+			}
+
+			public override async bool close_async (int io_priority, GLib.Cancellable? cancellable) throws IOError {
+				do_close ();
+				return true;
+			}
+
+			private void do_close () {
+			}
+
+			public void shutdown (TcpShutdownType type) throws IOError {
+			}
+
+			public ssize_t recv (uint8[] buffer) throws IOError {
+				ssize_t n;
+				lock (state) {
+					n = ssize_t.min (buffer.length, rx_buf.len);
+					if (n == 0) {
+						if (_state == CLOSED)
+							return 0;
+						throw new IOError.WOULD_BLOCK ("Resource temporarily unavailable");
+					}
+
+					Memory.copy (buffer, rx_buf.data, n);
+					rx_buf.remove_range (0, (uint) n);
+					rx_bytes_to_acknowledge += n;
+				}
+
+				update_events ();
+
+				LWIP.Runtime.schedule (do_acknowledge_rx_bytes);
+
+				return n;
+			}
+
+			public ssize_t send (uint8[] buffer) throws IOError {
+				ssize_t n;
+				lock (state) {
+					n = ssize_t.min (buffer.length, (ssize_t) tx_space_available);
+					if (n == 0)
+						throw new IOError.WOULD_BLOCK ("Resource temporarily unavailable");
+
+					tx_buf.append (buffer[:n]);
+					tx_space_available -= n;
+				}
+
+				update_events ();
+
+				LWIP.Runtime.schedule (do_send);
+
+				return n;
+			}
+
+			private void do_acknowledge_rx_bytes () {
+				size_t n;
+				lock (state) {
+					n = rx_bytes_to_acknowledge;
+					rx_bytes_to_acknowledge = 0;
+				}
+
+				if (n != 0)
+					pcb.notify_received ((uint16) n);
+			}
+
+			private void do_send () {
+				size_t available_space = pcb.query_available_send_buffer_space ();
+
+				uint8[] data;
+				lock (state) {
+					size_t n = size_t.min (tx_buf.len, available_space);
+
+					data = tx_buf.data[:n];
+					tx_buf.remove_range (0, (uint) n);
+				}
+
+				pcb.write (data);
+
+				available_space = pcb.query_available_send_buffer_space ();
+				lock (state)
+					tx_space_available = available_space - tx_buf.len;
+				update_events ();
+			}
+
+			public void register_source (Source source, IOCondition condition) {
+				lock (state)
+					sources[source] = condition | IOCondition.ERR | IOCondition.HUP;
+			}
+
+			public void unregister_source (Source source) {
+				lock (state)
+					sources.unset (source);
+			}
+
+			private void update_events () {
+				lock (state) {
+					IOCondition new_events = 0;
+
+					if (rx_buf.len != 0 || _state == CLOSED)
+						new_events |= IN;
+
+					if (tx_space_available != 0)
+						new_events |= OUT;
+
+					events = new_events;
+
+					foreach (var entry in sources.entries) {
+						Source source = entry.key;
+						IOCondition c = entry.value;
+						if ((new_events & c) != 0)
+							source.set_ready_time (0);
+					}
+				}
+			}
+
+			private void schedule_on_frida_thread (owned SourceFunc function) {
+				var source = new IdleSource ();
+				source.set_callback ((owned) function);
+				source.attach (main_context);
+			}
+		}
+
+		private enum TcpShutdownType {
+			READ = 1,
+			WRITE,
+			READ_WRITE
+		}
+
+		private class TcpInputStream : InputStream, PollableInputStream {
+			public weak TcpConnection connection {
+				get;
+				construct;
+			}
+
+			public TcpInputStream (TcpConnection connection) {
+				Object (connection: connection);
+			}
+
+			public override bool close (Cancellable? cancellable) throws IOError {
+				connection.shutdown (READ);
+				return true;
+			}
+
+			public override async bool close_async (int io_priority, Cancellable? cancellable) throws GLib.IOError {
+				return close (cancellable);
+			}
+
+			public override ssize_t read (uint8[] buffer, Cancellable? cancellable) throws IOError {
+				assert_not_reached ();
+			}
+
+			public bool can_poll () {
+				return true;
+			}
+
+			public bool is_readable () {
+				return (connection.pending_io & IOCondition.IN) != 0;
+			}
+
+			public PollableSource create_source (Cancellable? cancellable) {
+				return new PollableSource.full (this, new TcpIOSource (connection, IOCondition.IN), cancellable);
+			}
+
+			public ssize_t read_nonblocking_fn (uint8[] buffer) throws GLib.Error {
+				return connection.recv (buffer);
+			}
+		}
+
+		private class TcpOutputStream : OutputStream, PollableOutputStream {
+			public weak TcpConnection connection {
+				get;
+				construct;
+			}
+
+			public TcpOutputStream (TcpConnection connection) {
+				Object (connection: connection);
+			}
+
+			public override bool close (Cancellable? cancellable) throws IOError {
+				connection.shutdown (WRITE);
+				return true;
+			}
+
+			public override async bool close_async (int io_priority, Cancellable? cancellable) throws GLib.IOError {
+				return close (cancellable);
+			}
+
+			public override bool flush (GLib.Cancellable? cancellable) throws GLib.Error {
+				return true;
+			}
+
+			public override async bool flush_async (int io_priority, GLib.Cancellable? cancellable) throws GLib.Error {
+				return true;
+			}
+
+			public override ssize_t write (uint8[] buffer, Cancellable? cancellable) throws IOError {
+				assert_not_reached ();
+			}
+
+			public bool can_poll () {
+				return true;
+			}
+
+			public bool is_writable () {
+				return (connection.pending_io & IOCondition.OUT) != 0;
+			}
+
+			public PollableSource create_source (Cancellable? cancellable) {
+				return new PollableSource.full (this, new TcpIOSource (connection, IOCondition.OUT), cancellable);
+			}
+
+			public ssize_t write_nonblocking_fn (uint8[]? buffer) throws GLib.Error {
+				return connection.send (buffer);
+			}
+
+			public PollableReturn writev_nonblocking_fn (OutputVector[] vectors, out size_t bytes_written) throws GLib.Error {
+				assert_not_reached ();
+			}
+		}
+
+		private class TcpIOSource : Source {
+			public TcpConnection connection;
+			public IOCondition condition;
+
+			public TcpIOSource (TcpConnection connection, IOCondition condition) {
+				this.connection = connection;
+				this.condition = condition;
+
+				connection.register_source (this, condition);
+			}
+
+			~TcpIOSource () {
+				connection.unregister_source (this);
+			}
+
+			protected override bool prepare (out int timeout) {
+				timeout = -1;
+				return (connection.pending_io & condition) != 0;
+			}
+
+			protected override bool check () {
+				return (connection.pending_io & condition) != 0;
+			}
+
+			protected override bool dispatch (SourceFunc? callback) {
+				set_ready_time (-1);
+
+				if (callback == null)
+					return Source.REMOVE;
+
+				return callback ();
+			}
+
+			protected static bool closure_callback (Closure closure) {
+				var return_value = Value (typeof (bool));
+
+				closure.invoke (ref return_value, {});
+
+				return return_value.get_boolean ();
+			}
+		}
 	}
 
-	private sealed class TunnelKey {
+	public sealed class TunnelKey {
 		public Key handle;
 
 		public TunnelKey (owned Key handle) {
@@ -2149,7 +2567,6 @@ namespace Frida.Fruity.XPC {
 
 					session.consume_connection (n);
 				} catch (GLib.Error e) {
-					printerr ("\n\n\nUH OH: %s\n\n\n", e.message);
 					if (e is Error && pending_error == null)
 						pending_error = (Error) e;
 					is_processing_messages = false;
@@ -2232,6 +2649,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private int on_stream_close (int32 stream_id, uint32 error_code) {
+			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
 			io_cancellable.cancel ();
 			return 0;
 		}

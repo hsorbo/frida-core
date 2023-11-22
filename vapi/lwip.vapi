@@ -5,7 +5,7 @@ namespace LWIP {
 		public void init (InitDoneFunc init_done);
 
 		[CCode (cname = "tcpip_callback")]
-		public Result schedule (WorkFunc work);
+		public ErrorCode schedule (WorkFunc work);
 
 		[CCode (cname = "tcpip_init_done_fn")]
 		public delegate void InitDoneFunc ();
@@ -23,11 +23,11 @@ namespace LWIP {
 		public void set_down ();
 
 		public void ip6_addr_set (int8 addr_idx, IP6Address address);
-		public Result add_ip6_address (IP6Address address, int8 * chosen_index = null);
+		public ErrorCode add_ip6_address (IP6Address address, int8 * chosen_index = null);
 		public void ip6_addr_set_state (int8 addr_index, IP6AddressState state);
 
 		[CCode (cname = "netif_input")]
-		public static Result default_input_handler (PacketBuffer pbuf, NetworkInterface netif);
+		public static ErrorCode default_input_handler (PacketBuffer pbuf, NetworkInterface netif);
 
 		public NetworkInterfaceInputFunc input;
 		public NetworkInterfaceOutputIP6Func output_ip6;
@@ -38,13 +38,13 @@ namespace LWIP {
 	}
 
 	[CCode (cname = "netif_init_fn", has_target = false)]
-	public delegate Result NetworkInterfaceInitFunc (NetworkInterface netif);
+	public delegate ErrorCode NetworkInterfaceInitFunc (NetworkInterface netif);
 
 	[CCode (cname = "netif_input_fn", has_target = false)]
-	public delegate Result NetworkInterfaceInputFunc (PacketBuffer pbuf, NetworkInterface netif);
+	public delegate ErrorCode NetworkInterfaceInputFunc (PacketBuffer pbuf, NetworkInterface netif);
 
 	[CCode (cname = "netif_output_ip6_fn", has_target = false)]
-	public delegate Result NetworkInterfaceOutputIP6Func (NetworkInterface netif, PacketBuffer pbuf, IP6Address address);
+	public delegate ErrorCode NetworkInterfaceOutputIP6Func (NetworkInterface netif, PacketBuffer pbuf, IP6Address address);
 
 	[CCode (cheader_filename = "lwip/ip6_addr.h", cname = "ip6_addr_t", cprefix = "ip6_addr_")]
 	public struct IP6Address {
@@ -90,7 +90,7 @@ namespace LWIP {
 		[CCode (array_length = false)]
 		public unowned uint8[] get_contiguous (uint8[] buffer, uint16 len, uint16 offset = 0);
 
-		public Result take (uint8[] data);
+		public ErrorCode take (uint8[] data);
 
 		[CCode (cname = "pbuf_layer", cprefix = "PBUF_", has_type_id = false)]
 		public enum Layer {
@@ -116,16 +116,49 @@ namespace LWIP {
 		[CCode (cname = "tcp_new_ip_type")]
 		public TcpPcb (IPAddressType type);
 
+		[CCode (cname = "tcp_arg")]
+		public void set_user_data (void * user_data);
+
+		[CCode (cname = "tcp_recv")]
+		public void set_recv_callback (RecvFunc f);
+
+		[CCode (cname = "tcp_err")]
+		public void set_error_callback (ErrorFunc f);
+
+		public void nagle_disable ();
+		public void nagle_enable ();
+
 		public void bind_netif (NetworkInterface? netif);
 
-		public Result connect (IP6Address address, uint16 port, ConnectedFunc connected);
+		public ErrorCode connect (IP6Address address, uint16 port, ConnectedFunc connected);
+
+		[CCode (cname = "tcp_recved")]
+		public void notify_received (uint16 len);
+
+		[CCode (cname = "tcp_sndbuf")]
+		public uint16 query_available_send_buffer_space ();
+
+		public ErrorCode write (uint8[] data, WriteFlags flags = 0);
+
+		[CCode (cname = "tcp_recv_fn", has_target = false)]
+		public delegate ErrorCode RecvFunc (void * user_data, TcpPcb pcb, PacketBuffer? pbuf, ErrorCode err);
+
+		[CCode (cname = "tcp_err_fn", has_target = false)]
+		public delegate void ErrorFunc (void * user_data, ErrorCode err);
 
 		[CCode (cname = "tcp_connected_fn", has_target = false)]
-		public delegate Result ConnectedFunc (void * arg, TcpPcb pcb, Result res);
+		public delegate ErrorCode ConnectedFunc (void * user_data, TcpPcb pcb, ErrorCode err);
+
+		[Flags]
+		[CCode (cname = "u8_t", cprefix = "TCP_WRITE_FLAG_", has_type_id = false)]
+		public enum WriteFlags {
+			COPY,
+			MORE,
+		}
 	}
 
-	[CCode (cheader_filename = "lwip/err.h", cname = "err_t", cprefix = "ERR_", has_type_id = false)]
-	public enum Result {
+	[CCode (cheader_filename = "lwip/err.h", cname = "err_t", cprefix = "ERR_", lower_case_cprefix = "err_", has_type_id = false)]
+	public enum ErrorCode {
 		OK,
 		MEM,
 		BUF,
@@ -142,6 +175,8 @@ namespace LWIP {
 		ABRT,
 		RST,
 		CLSD,
-		ARG,
+		ARG;
+
+		public int to_errno ();
 	}
 }

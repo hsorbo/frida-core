@@ -36,22 +36,25 @@ namespace Frida.Fruity.XPC {
 			//printerr ("\n");
 
 			Device device = yield pick_device (services, cancellable);
-			printerr ("Opened device.address=\"%s\" disco=%p\n", device.address, device.disco);
 
-			var tunnel = yield TunnelService.open (
+			var tunnel_service = yield TunnelService.open (
 				yield device.open_service ("com.apple.internal.dt.coredevice.untrusted.tunnelservice", cancellable),
 				cancellable);
-			printerr ("Opened TunnelService!\n");
-			DeviceInfo di = tunnel.device_info;
-			printerr ("%s\n", di.to_string ());
-			printerr ("%s\n", di.kvs.to_xml ());
+			//DeviceInfo di = tunnel_service.device_info;
+			//printerr ("%s\n", di.to_string ());
+			//printerr ("%s\n", di.kvs.to_xml ());
 
-			yield tunnel.create_listener (device.address, cancellable);
+			TunnelConnection tunnel = yield tunnel_service.establish (device.address, cancellable);
 
-			printerr ("\n\n=== Yay. Sleeping indefinitely.\n");
+			IOStream rsd = yield tunnel.open_connection (tunnel.remote_rsd_port, cancellable);
+			printerr (">>> DiscoveryService.open()\n");
+			var disco = yield DiscoveryService.open (rsd, cancellable);
+			printerr ("<<< DiscoveryService.open()\n");
+
+			printerr ("\n\n=== Yay, rsd=%p. Sleeping indefinitely.\n", rsd);
 			yield;
 		} catch (Error e) {
-			printerr ("%s\n", e.message);
+			printerr ("Oh noes: %s\n", e.message);
 		} catch (IOError e) {
 			assert_not_reached ();
 		}
@@ -60,7 +63,7 @@ namespace Frida.Fruity.XPC {
 	private async Device pick_device (PairingService[] services, Cancellable? cancellable) throws Error, IOError {
 		foreach (PairingService service in services) {
 			foreach (PairingServiceHost host in yield service.resolve (cancellable)) {
-				if (host.name != "iPad.local.") {
+				if (host.name != "iPad-2.local.") {
 					printerr ("Skipping: %s\n", host.to_string ());
 					continue;
 				}
