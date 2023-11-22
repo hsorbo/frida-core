@@ -82,7 +82,7 @@ namespace LWIP {
 	public class PacketBuffer {
 		public static PacketBuffer alloc (Layer layer, uint16 length, Type type);
 
-		public PacketBuffer next;
+		public PacketBuffer? next;
 		[CCode (array_length_cname = "len")]
 		public uint8[] payload;
 		public uint16 tot_len;
@@ -139,6 +139,7 @@ namespace LWIP {
 		public uint16 query_available_send_buffer_space ();
 
 		public ErrorCode write (uint8[] data, WriteFlags flags = 0);
+		public ErrorCode output ();
 
 		[CCode (cname = "tcp_recv_fn", has_target = false)]
 		public delegate ErrorCode RecvFunc (void * user_data, TcpPcb pcb, PacketBuffer? pbuf, ErrorCode err);

@@ -1741,15 +1741,16 @@ namespace Frida.Fruity.XPC {
 				ssize_t n;
 				lock (state) {
 					n = ssize_t.min (buffer.length, rx_buf.len);
-					if (n == 0) {
-						if (_state == CLOSED)
-							return 0;
-						throw new IOError.WOULD_BLOCK ("Resource temporarily unavailable");
+					if (n != 0) {
+						Memory.copy (buffer, rx_buf.data, n);
+						rx_buf.remove_range (0, (uint) n);
+						rx_bytes_to_acknowledge += n;
 					}
-
-					Memory.copy (buffer, rx_buf.data, n);
-					rx_buf.remove_range (0, (uint) n);
-					rx_bytes_to_acknowledge += n;
+				}
+				if (n == 0) {
+					if (_state == CLOSED)
+						return 0;
+					throw new IOError.WOULD_BLOCK ("Resource temporarily unavailable");
 				}
 
 				update_events ();
@@ -1763,12 +1764,13 @@ namespace Frida.Fruity.XPC {
 				ssize_t n;
 				lock (state) {
 					n = ssize_t.min (buffer.length, (ssize_t) tx_space_available);
-					if (n == 0)
-						throw new IOError.WOULD_BLOCK ("Resource temporarily unavailable");
-
-					tx_buf.append (buffer[:n]);
-					tx_space_available -= n;
+					if (n != 0) {
+						tx_buf.append (buffer[:n]);
+						tx_space_available -= n;
+					}
 				}
+				if (n == 0)
+					throw new IOError.WOULD_BLOCK ("Resource temporarily unavailable");
 
 				update_events ();
 
@@ -1800,6 +1802,7 @@ namespace Frida.Fruity.XPC {
 				}
 
 				pcb.write (data);
+				pcb.output ();
 
 				available_space = pcb.query_available_send_buffer_space ();
 				lock (state)
