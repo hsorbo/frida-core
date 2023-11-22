@@ -40,18 +40,28 @@ namespace Frida.Fruity.XPC {
 			var tunnel_service = yield TunnelService.open (
 				yield device.open_service ("com.apple.internal.dt.coredevice.untrusted.tunnelservice", cancellable),
 				cancellable);
-			//DeviceInfo di = tunnel_service.device_info;
-			//printerr ("%s\n", di.to_string ());
-			//printerr ("%s\n", di.kvs.to_xml ());
 
 			TunnelConnection tunnel = yield tunnel_service.establish (device.address, cancellable);
 
-			IOStream rsd = yield tunnel.open_connection (tunnel.remote_rsd_port, cancellable);
-			printerr (">>> DiscoveryService.open()\n");
-			var disco = yield DiscoveryService.open (rsd, cancellable);
-			printerr ("<<< DiscoveryService.open()\n");
+			var disco = yield DiscoveryService.open (
+				yield tunnel.open_connection (tunnel.remote_rsd_port, cancellable),
+				cancellable);
 
-			printerr ("\n\n=== Yay, rsd=%p. Sleeping indefinitely.\n", rsd);
+			var app_service = yield AppService.open (
+				yield tunnel.open_connection (disco.get_service ("com.apple.coredevice.appservice").port, cancellable),
+				cancellable);
+
+			printerr ("=== Applications\n");
+			foreach (ApplicationInfo app in yield app_service.enumerate_applications ()) {
+				printerr ("%s\n", app.to_string ());
+			}
+
+			printerr ("\n=== Processes\n");
+			foreach (ProcessInfo p in yield app_service.enumerate_processes ()) {
+				printerr ("%s\n", p.to_string ());
+			}
+
+			printerr ("\n\n=== Yay. Sleeping indefinitely.\n");
 			yield;
 		} catch (Error e) {
 			printerr ("Oh noes: %s\n", e.message);
@@ -174,32 +184,4 @@ namespace Frida.Fruity.XPC {
 
 		return "(%s, scope_id: %u)".printf (desc.str, *scope_id);
 	}
-
-#if 0
-	private async void test_xpc () {
-		try {
-			var disco = yield DiscoveryService.open (new Endpoint (TUNNEL_HOST, RSD_PORT));
-			Endpoint ep = disco.get_service ("com.apple.coredevice.appservice");
-			disco.close ();
-
-			var app_service = yield AppService.open (ep);
-
-			printerr ("=== Applications\n");
-			foreach (ApplicationInfo app in yield app_service.enumerate_applications ()) {
-				printerr ("%s\n", app.to_string ());
-			}
-
-			printerr ("\n=== Processes\n");
-			foreach (ProcessInfo p in yield app_service.enumerate_processes ()) {
-				printerr ("%s\n", p.to_string ());
-			}
-
-			yield;
-		} catch (Error e) {
-			printerr ("%s\n", e.message);
-		} catch (IOError e) {
-			assert_not_reached ();
-		}
-	}
-#endif
 }
