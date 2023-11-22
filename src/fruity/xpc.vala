@@ -139,6 +139,10 @@ namespace Frida.Fruity.XPC {
 			} catch (Error e) {
 			}
 		}
+
+		public string to_string () {
+			return @"DiscoveryService { handshake_body: $(variant_to_pretty_string (handshake_body)) }";
+		}
 	}
 
 	public class ServiceInfo {
@@ -1460,7 +1464,8 @@ namespace Frida.Fruity.XPC {
 			var pbuf = LWIP.PacketBuffer.alloc (RAW, (uint16) datagram.get_size (), POOL);
 			pbuf.take (datagram.get_data ());
 
-			netif.input (pbuf, netif);
+			if (netif.input (pbuf, netif) != OK)
+				pbuf.free ();
 		}
 
 		private static void on_rand (uint8[] dest, NGTcp2.RNGContext rand_ctx) {
@@ -1801,7 +1806,7 @@ namespace Frida.Fruity.XPC {
 					tx_buf.remove_range (0, (uint) n);
 				}
 
-				pcb.write (data);
+				pcb.write (data, COPY);
 				pcb.output ();
 
 				available_space = pcb.query_available_send_buffer_space ();

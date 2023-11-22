@@ -82,6 +82,8 @@ namespace LWIP {
 	public class PacketBuffer {
 		public static PacketBuffer alloc (Layer layer, uint16 length, Type type);
 
+		public uint8 free ();
+
 		public PacketBuffer? next;
 		[CCode (array_length_cname = "len")]
 		public uint8[] payload;
