@@ -956,6 +956,7 @@ namespace Frida.Fruity.XPC {
 		private string? remote_ipv6_address;
 		private uint16 _remote_rsd_port;
 		private uint16 mtu;
+		private bool netif_added = false;
 		private LWIP.NetworkInterface netif;
 
 		private Gee.Map<int64?, Stream> streams = new Gee.HashMap<int64?, Stream> (Numeric.int64_hash, Numeric.int64_equal);
@@ -1029,6 +1030,23 @@ namespace Frida.Fruity.XPC {
 			ssl.set_quic_transport_version (OpenSSL.TLSExtensionType.quic_transport_parameters);
 
 			main_context = MainContext.ref_thread_default ();
+		}
+
+		public override void dispose () {
+			if (netif_added) {
+				netif_added = false;
+
+				ref ();
+				LWIP.Runtime.schedule (remove_network_interface);
+			}
+
+			base.dispose ();
+		}
+
+		private void remove_network_interface () {
+			netif.remove ();
+
+			unref ();
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -1169,6 +1187,7 @@ namespace Frida.Fruity.XPC {
 			mtu = (uint16) raw_mtu;
 
 			LWIP.Runtime.schedule (setup_network_interface);
+			netif_added = true;
 
 			established.resolve (true);
 		}
@@ -1447,7 +1466,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private int on_recv_datagram (uint32 flags, uint8[] data) {
-			if (local_ipv6_address != null) {
+			if (netif_added) {
 				lock (rx_datagrams)
 					rx_datagrams.offer (new Bytes (data));
 				LWIP.Runtime.schedule (process_next_rx_datagram);
@@ -1603,7 +1622,7 @@ namespace Frida.Fruity.XPC {
 			private TcpInputStream _input_stream;
 			private TcpOutputStream _output_stream;
 
-			private LWIP.TcpPcb pcb;
+			private LWIP.TcpPcb? pcb;
 			private IOCondition events = 0;
 			private ByteArray rx_buf = new ByteArray.sized (2048);
 			private ByteArray tx_buf = new ByteArray.sized (2048);
@@ -1651,21 +1670,37 @@ namespace Frida.Fruity.XPC {
 				main_context = MainContext.ref_thread_default ();
 			}
 
+			public override void dispose () {
+				stop ();
+
+				base.dispose ();
+			}
+
 			private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
 				_state = OPENING;
-				LWIP.Runtime.schedule (start);
+				LWIP.Runtime.schedule (do_start);
 
-				yield established.future.wait_async (cancellable);
+				try {
+					yield established.future.wait_async (cancellable);
+				} catch (GLib.Error e) {
+					stop ();
+					throw_api_error (e);
+				}
 
 				return true;
 			}
 
-			private void start () {
+			private void do_start () {
 				pcb = new LWIP.TcpPcb (V6);
 				pcb.set_user_data (this);
 				pcb.set_recv_callback ((user_data, pcb, pbuf, err) => {
 					TcpConnection * self = user_data;
-					self->on_recv (pbuf);
+					self->on_recv (pbuf, err);
+					return OK;
+				});
+				pcb.set_sent_callback ((user_data, pcb, len) => {
+					TcpConnection * self = user_data;
+					self->on_sent (len);
 					return OK;
 				});
 				pcb.set_error_callback ((user_data, err) => {
@@ -1680,6 +1715,25 @@ namespace Frida.Fruity.XPC {
 					self->on_connect ();
 					return OK;
 				});
+			}
+
+			private void stop () {
+				if (_state == CLOSED)
+					return;
+				_state = CLOSED;
+
+				ref ();
+				LWIP.Runtime.schedule (do_stop);
+			}
+
+			private void do_stop () {
+				if (pcb != null) {
+					if (pcb.close () != OK)
+						pcb.abort ();
+					pcb = null;
+				}
+
+				unref ();
 			}
 
 			private void on_connect () {
@@ -1697,13 +1751,21 @@ namespace Frida.Fruity.XPC {
 				});
 			}
 
-			private void on_recv (LWIP.PacketBuffer? pbuf) {
+			private void on_recv (LWIP.PacketBuffer? pbuf, LWIP.ErrorCode err) {
+				printerr ("on_recv() pbuf=%p err=%d\n", pbuf, err);
+
 				if (pbuf == null) {
+					if (err == OK) {
+						pcb.close ();
+						pcb = null;
+					}
+
 					schedule_on_frida_thread (() => {
 						_state = CLOSED;
 						update_events ();
 						return Source.REMOVE;
 					});
+
 					return;
 				}
 
@@ -1712,9 +1774,19 @@ namespace Frida.Fruity.XPC {
 				lock (state)
 					rx_buf.append (chunk[:pbuf.tot_len]);
 				update_events ();
+
+				pbuf.free ();
+			}
+
+			private void on_sent (uint16 len) {
+				lock (state)
+					tx_space_available = pcb.query_available_send_buffer_space () - tx_buf.len;
+				update_events ();
 			}
 
 			private void on_error (LWIP.ErrorCode err) {
+				printerr ("on_error() err=%d\n", err);
+
 				schedule_on_frida_thread (() => {
 					_state = CLOSED;
 					update_events ();
@@ -1727,19 +1799,33 @@ namespace Frida.Fruity.XPC {
 			}
 
 			public override bool close (GLib.Cancellable? cancellable) throws IOError {
-				do_close ();
+				stop ();
 				return true;
 			}
 
 			public override async bool close_async (int io_priority, GLib.Cancellable? cancellable) throws IOError {
-				do_close ();
+				stop ();
 				return true;
 			}
 
-			private void do_close () {
+			public void shutdown_rx () throws IOError {
+				LWIP.Runtime.schedule (do_shutdown_rx);
 			}
 
-			public void shutdown (TcpShutdownType type) throws IOError {
+			private void do_shutdown_rx () {
+				if (pcb == null)
+					return;
+				pcb.shutdown (true, false);
+			}
+
+			public void shutdown_tx () throws IOError {
+				LWIP.Runtime.schedule (do_shutdown_tx);
+			}
+
+			private void do_shutdown_tx () {
+				if (pcb == null)
+					return;
+				pcb.shutdown (false, true);
 			}
 
 			public ssize_t recv (uint8[] buffer) throws IOError {
@@ -1765,6 +1851,20 @@ namespace Frida.Fruity.XPC {
 				return n;
 			}
 
+			private void do_acknowledge_rx_bytes () {
+				if (pcb == null)
+					return;
+
+				size_t n;
+				lock (state) {
+					n = rx_bytes_to_acknowledge;
+					rx_bytes_to_acknowledge = 0;
+				}
+
+				if (n != 0)
+					pcb.notify_received ((uint16) n);
+			}
+
 			public ssize_t send (uint8[] buffer) throws IOError {
 				ssize_t n;
 				lock (state) {
@@ -1784,27 +1884,22 @@ namespace Frida.Fruity.XPC {
 				return n;
 			}
 
-			private void do_acknowledge_rx_bytes () {
-				size_t n;
-				lock (state) {
-					n = rx_bytes_to_acknowledge;
-					rx_bytes_to_acknowledge = 0;
-				}
-
-				if (n != 0)
-					pcb.notify_received ((uint16) n);
-			}
-
 			private void do_send () {
+				if (pcb == null)
+					return;
+
 				size_t available_space = pcb.query_available_send_buffer_space ();
 
-				uint8[] data;
+				uint8[]? data = null;
 				lock (state) {
 					size_t n = size_t.min (tx_buf.len, available_space);
-
-					data = tx_buf.data[:n];
-					tx_buf.remove_range (0, (uint) n);
+					if (n != 0) {
+						data = tx_buf.data[:n];
+						tx_buf.remove_range (0, (uint) n);
+					}
 				}
+				if (data == null)
+					return;
 
 				pcb.write (data, COPY);
 				pcb.output ();
@@ -1853,12 +1948,6 @@ namespace Frida.Fruity.XPC {
 			}
 		}
 
-		private enum TcpShutdownType {
-			READ = 1,
-			WRITE,
-			READ_WRITE
-		}
-
 		private class TcpInputStream : InputStream, PollableInputStream {
 			public weak TcpConnection connection {
 				get;
@@ -1870,7 +1959,7 @@ namespace Frida.Fruity.XPC {
 			}
 
 			public override bool close (Cancellable? cancellable) throws IOError {
-				connection.shutdown (READ);
+				connection.shutdown_rx ();
 				return true;
 			}
 
@@ -1910,7 +1999,7 @@ namespace Frida.Fruity.XPC {
 			}
 
 			public override bool close (Cancellable? cancellable) throws IOError {
-				connection.shutdown (WRITE);
+				connection.shutdown_tx ();
 				return true;
 			}
 
