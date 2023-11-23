@@ -65,8 +65,6 @@ namespace Frida.Fruity.XPC {
 			construct;
 		}
 
-		private Cancellable io_cancellable = new Cancellable ();
-
 		private Connection connection;
 
 		private Promise<Variant> handshake_promise = new Promise<Variant> ();
@@ -1033,20 +1031,9 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public override void dispose () {
-			if (netif_added) {
-				netif_added = false;
-
-				ref ();
-				LWIP.Runtime.schedule (remove_network_interface);
-			}
+			ensure_network_interface_removed ();
 
 			base.dispose ();
-		}
-
-		private void remove_network_interface () {
-			netif.remove ();
-
-			unref ();
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -1195,6 +1182,21 @@ namespace Frida.Fruity.XPC {
 		private void setup_network_interface () {
 			LWIP.NetworkInterface.add_noaddr (ref netif, this, on_netif_init);
 			netif.set_up ();
+		}
+
+		private void ensure_network_interface_removed () {
+			if (!netif_added)
+				return;
+			netif_added = false;
+
+			ref ();
+			LWIP.Runtime.schedule (remove_network_interface);
+		}
+
+		private void remove_network_interface () {
+			netif.remove ();
+
+			unref ();
 		}
 
 		public async IOStream open_connection (uint16 port, Cancellable? cancellable = null) throws Error, IOError {
@@ -1633,8 +1635,6 @@ namespace Frida.Fruity.XPC {
 
 			private MainContext main_context;
 
-			private Cancellable io_cancellable = new Cancellable ();
-
 			public enum State {
 				CREATED,
 				OPENING,
@@ -1695,24 +1695,28 @@ namespace Frida.Fruity.XPC {
 				pcb.set_user_data (this);
 				pcb.set_recv_callback ((user_data, pcb, pbuf, err) => {
 					TcpConnection * self = user_data;
-					self->on_recv (pbuf, err);
+					if (self != null)
+						self->on_recv (pbuf, err);
 					return OK;
 				});
 				pcb.set_sent_callback ((user_data, pcb, len) => {
 					TcpConnection * self = user_data;
-					self->on_sent (len);
+					if (self != null)
+						self->on_sent (len);
 					return OK;
 				});
 				pcb.set_error_callback ((user_data, err) => {
 					TcpConnection * self = user_data;
-					self->on_error (err);
+					if (self != null)
+						self->on_error (err);
 				});
 				pcb.nagle_disable ();
 				pcb.bind_netif (tunnel_connection.netif);
 
 				pcb.connect (LWIP.IP6Address.parse (address), port, (user_data, pcb, err) => {
 					TcpConnection * self = user_data;
-					self->on_connect ();
+					if (self != null)
+						self->on_connect ();
 					return OK;
 				});
 			}
@@ -1720,14 +1724,18 @@ namespace Frida.Fruity.XPC {
 			private void stop () {
 				if (_state == CLOSED)
 					return;
-				_state = CLOSED;
 
-				ref ();
-				LWIP.Runtime.schedule (do_stop);
+				if (state != CREATED) {
+					ref ();
+					LWIP.Runtime.schedule (do_stop);
+				}
+
+				_state = CLOSED;
 			}
 
 			private void do_stop () {
 				if (pcb != null) {
+					pcb.set_user_data (null);
 					if (pcb.close () != OK)
 						pcb.abort ();
 					pcb = null;
@@ -1752,20 +1760,12 @@ namespace Frida.Fruity.XPC {
 			}
 
 			private void on_recv (LWIP.PacketBuffer? pbuf, LWIP.ErrorCode err) {
-				printerr ("on_recv() pbuf=%p err=%d\n", pbuf, err);
-
 				if (pbuf == null) {
-					if (err == OK) {
-						pcb.close ();
-						pcb = null;
-					}
-
 					schedule_on_frida_thread (() => {
 						_state = CLOSED;
 						update_events ();
 						return Source.REMOVE;
 					});
-
 					return;
 				}
 
@@ -1785,8 +1785,6 @@ namespace Frida.Fruity.XPC {
 			}
 
 			private void on_error (LWIP.ErrorCode err) {
-				printerr ("on_error() err=%d\n", err);
-
 				schedule_on_frida_thread (() => {
 					_state = CLOSED;
 					update_events ();
