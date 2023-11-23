@@ -504,6 +504,7 @@ if have_fruity_backend
   elif host_os_family == 'linux'
     backend_sources += 'fruity/xpc-linux.vala'
   endif
+
   backend_vala_args += '--pkg=openssl'
   if host_os_family == 'darwin'
     backend_vala_args += [
@@ -511,6 +512,10 @@ if have_fruity_backend
       '--pkg=darwin-dns-sd',
       '--pkg=darwin-net',
     ]
+  endif
+  
+  if host_os_family == 'linux'
+    backend_vala_args += '--pkg=linux'
   endif
 endif
 
