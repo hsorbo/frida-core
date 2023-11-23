@@ -51,28 +51,28 @@ namespace Frida.Fruity.XPC {
 
 	private class LinuxPairingService : Object, PairingService {
 		public string name {
-			get;
-			construct;
+			get { return _name; }
 		}
 
 		public uint interface_index {
-			get;
-			construct;
+			get { return _interface_index; }
 		}
 
 		public string interface_name {
-			get;
-			construct;
+			get { return _interface_name; }
 		}
+
+		private string _name;
+		private uint _interface_index;
+		private string _interface_name;
 
 		private AvahiServer server;
 
 		internal LinuxPairingService (string name, uint interface_index, string interface_name, AvahiServer server) {
-			Object (
-				name: name,
-				interface_index: interface_index,
-				interface_name: interface_name
-			);
+			_name = name;
+			_interface_index = interface_index;
+			_interface_name = interface_name;
+
 			this.server = server;
 		}
 
@@ -130,32 +130,31 @@ namespace Frida.Fruity.XPC {
 
 	public class LinuxPairingServiceHost : Object, PairingServiceHost {
 		public string name {
-			get;
-			construct;
+			get { return _name; }
 		}
 
 		public InetSocketAddress address {
-			get;
-			construct;
+			get { return _address; }
 		}
 
 		public uint16 port {
-			get;
-			construct;
+			get { return _port; }
 		}
 
 		public Bytes txt_record {
-			get;
-			construct;
+			get { return _txt_record; }
 		}
 
+		private string _name;
+		private InetSocketAddress _address;
+		private uint16 _port;
+		private Bytes _txt_record;
+
 		internal LinuxPairingServiceHost (string name, InetSocketAddress address, uint16 port, Bytes txt_record) {
-			Object (
-				name: name,
-				address: address,
-				port: port,
-				txt_record: txt_record
-			);
+			_name = name;
+			_address = address;
+			_port = port;
+			_txt_record = txt_record;
 		}
 
 		public async Gee.List<InetSocketAddress> resolve (Cancellable? cancellable) throws Error, IOError {
