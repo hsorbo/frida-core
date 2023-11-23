@@ -19,6 +19,8 @@ namespace LWIP {
 		public static void add_noaddr (ref NetworkInterface netif, void * state, NetworkInterfaceInitFunc init,
 			NetworkInterfaceInputFunc input = NetworkInterface.default_input_handler);
 
+		public void remove ();
+
 		public void set_up ();
 		public void set_down ();
 
@@ -123,12 +125,17 @@ namespace LWIP {
 
 		[CCode (cname = "tcp_recv")]
 		public void set_recv_callback (RecvFunc f);
-
+		[CCode (cname = "tcp_sent")]
+		public void set_sent_callback (SentFunc f);
 		[CCode (cname = "tcp_err")]
 		public void set_error_callback (ErrorFunc f);
 
 		public void nagle_disable ();
 		public void nagle_enable ();
+
+		public void abort ();
+		public ErrorCode close ();
+		public ErrorCode shutdown (bool shut_rx, bool shut_tx);
 
 		public void bind_netif (NetworkInterface? netif);
 
@@ -145,6 +152,9 @@ namespace LWIP {
 
 		[CCode (cname = "tcp_recv_fn", has_target = false)]
 		public delegate ErrorCode RecvFunc (void * user_data, TcpPcb pcb, PacketBuffer? pbuf, ErrorCode err);
+
+		[CCode (cname = "tcp_sent_fn", has_target = false)]
+		public delegate ErrorCode SentFunc (void * user_data, TcpPcb pcb, uint16 len);
 
 		[CCode (cname = "tcp_err_fn", has_target = false)]
 		public delegate void ErrorFunc (void * user_data, ErrorCode err);
