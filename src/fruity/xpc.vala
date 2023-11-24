@@ -48,14 +48,14 @@ namespace Frida.Fruity.XPC {
 			get;
 		}
 
-		public abstract Bytes txt_record {
+		public abstract Gee.List<string> txt_record {
 			get;
 		}
 
 		public abstract async Gee.List<InetSocketAddress> resolve (Cancellable? cancellable = null) throws Error, IOError;
 
 		public string to_string () {
-			return @"PairingServiceHost { name: \"$name\", port: $port, txt_record: <$(txt_record.length) bytes> }";
+			return @"PairingServiceHost { name: \"$name\", port: $port, txt_record: <$(txt_record.size) entries> }";
 		}
 	}
 

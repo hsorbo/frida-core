@@ -32,14 +32,18 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private void on_item_new (int interface_index, AvahiProtocol protocol, string name, string type, string domain, uint flags) {
-			printerr ("item_new: interface_index=%d protocol=%s name=\"%s\" type=\"%s\" domain=\"%s\" flags=%u\n",
+			char raw_interface_name[Linux.Network.INTERFACE_NAME_SIZE];
+			Linux.Network.if_indextoname (interface_index, (string) raw_interface_name);
+			unowned string interface_name = (string) raw_interface_name;
+			printerr ("item_new: interface_index=%d interface_name=\"%s\" protocol=%s name=\"%s\" type=\"%s\" domain=\"%s\" flags=%u\n",
 				interface_index,
+				interface_name,
 				protocol.to_string (),
 				name,
 				type,
 				domain,
 				flags);
-			current_batch.add (new LinuxPairingService (name, interface_index, "FIXME", protocol, server));
+			current_batch.add (new LinuxPairingService (name, interface_index, interface_name, protocol, server));
 		}
 
 		private void on_all_for_now () {
@@ -93,11 +97,21 @@ namespace Frida.Fruity.XPC {
 			var hosts = new Gee.ArrayList<PairingServiceHost> ();
 			resolver.found.connect ((interface_index, protocol, name, type, domain, host, address_protocol, address, port, txt,
 					flags) => {
+				var txt_record = new Gee.ArrayList<string> ();
+				var iter = new VariantIter (txt);
+				Variant? cur;
+				while ((cur = iter.next_value ()) != null) {
+					unowned string raw_val = (string) cur.get_data ();
+					string val = raw_val.make_valid ((ssize_t) cur.get_size ());
+					txt_record.add (val);
+				}
+
 				hosts.add (new LinuxPairingServiceHost (
 					host,
 					new InetSocketAddress.from_string (address, port),
 					port,
-					new Bytes ({})));
+					txt_record));
+
 				if (!promise.future.ready)
 					promise.resolve (hosts);
 			});
@@ -129,16 +143,16 @@ namespace Frida.Fruity.XPC {
 			get { return _port; }
 		}
 
-		public Bytes txt_record {
+		public Gee.List<string> txt_record {
 			get { return _txt_record; }
 		}
 
 		private string _name;
 		private InetSocketAddress _address;
 		private uint16 _port;
-		private Bytes _txt_record;
+		private Gee.List<string> _txt_record;
 
-		internal LinuxPairingServiceHost (string name, InetSocketAddress address, uint16 port, Bytes txt_record) {
+		internal LinuxPairingServiceHost (string name, InetSocketAddress address, uint16 port, Gee.List<string> txt_record) {
 			_name = name;
 			_address = address;
 			_port = port;

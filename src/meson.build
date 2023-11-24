@@ -508,6 +508,9 @@ if host_os_family == 'darwin'
     '--pkg=darwin-net',
   ]
 endif
+if host_os_family == 'linux'
+  backend_vala_args += '--pkg=linux'
+endif
 
 droidy_sources = [
   'droidy/droidy-host-session.vala',
