@@ -73,7 +73,7 @@ namespace Frida.Fruity.XPC {
 	private async Device pick_device (PairingService[] services, Cancellable? cancellable) throws Error, IOError {
 		foreach (PairingService service in services) {
 			foreach (PairingServiceHost host in yield service.resolve (cancellable)) {
-				if (host.name != "iPad-2.local.") {
+				if (!host.name.has_prefix ("iPad")) {
 					printerr ("Skipping: %s\n", host.to_string ());
 					continue;
 				}

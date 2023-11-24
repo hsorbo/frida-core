@@ -19,14 +19,13 @@ namespace Frida.Fruity.XPC {
 
 				server = yield connection.get_proxy (AVAHI_SERVICE_NAME, "/", DO_NOT_LOAD_PROPERTIES, io_cancellable);
 
-				GLib.ObjectPath browser_path = yield server.service_browser_new (-1, INET6, PAIRING_REGTYPE, PAIRING_DOMAIN,
-					0, io_cancellable);
+				GLib.ObjectPath browser_path = yield server.service_browser_prepare (-1, INET6, PAIRING_REGTYPE,
+					PAIRING_DOMAIN, 0, io_cancellable);
 				browser = yield connection.get_proxy (AVAHI_SERVICE_NAME, browser_path, DO_NOT_LOAD_PROPERTIES,
 					io_cancellable);
 				browser.item_new.connect (on_item_new);
 				browser.all_for_now.connect (on_all_for_now);
 				yield browser.start (io_cancellable);
-				printerr ("Browser started!\n");
 			} catch (GLib.Error e) {
 				printerr ("Oopsie: %s\n", e.message);
 			}
@@ -40,7 +39,7 @@ namespace Frida.Fruity.XPC {
 				type,
 				domain,
 				flags);
-			current_batch.add (new LinuxPairingService (name, interface_index, "FIXME", server));
+			current_batch.add (new LinuxPairingService (name, interface_index, "FIXME", protocol, server));
 		}
 
 		private void on_all_for_now () {
@@ -65,13 +64,16 @@ namespace Frida.Fruity.XPC {
 		private string _name;
 		private uint _interface_index;
 		private string _interface_name;
+		private AvahiProtocol protocol;
 
 		private AvahiServer server;
 
-		internal LinuxPairingService (string name, uint interface_index, string interface_name, AvahiServer server) {
+		internal LinuxPairingService (string name, uint interface_index, string interface_name, AvahiProtocol protocol,
+				AvahiServer server) {
 			_name = name;
 			_interface_index = interface_index;
 			_interface_name = interface_name;
+			this.protocol = protocol;
 
 			this.server = server;
 		}
@@ -79,9 +81,7 @@ namespace Frida.Fruity.XPC {
 		public async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable) throws Error, IOError {
 			AvahiServiceResolver resolver;
 			try {
-				printerr ("Creating resolver for name=\"%s\" regtype=\"%s\" domain=\"%s\"\n", name, PAIRING_REGTYPE,
-					PAIRING_DOMAIN);
-				GLib.ObjectPath path = yield server.service_resolver_new ((int) interface_index, INET6, name,
+				GLib.ObjectPath path = yield server.service_resolver_prepare ((int) interface_index, protocol, name,
 					PAIRING_REGTYPE, PAIRING_DOMAIN, INET6, 0, cancellable);
 				DBusConnection connection = ((DBusProxy) server).get_connection ();
 				resolver = yield connection.get_proxy (AVAHI_SERVICE_NAME, path, DO_NOT_LOAD_PROPERTIES, cancellable);
@@ -91,9 +91,8 @@ namespace Frida.Fruity.XPC {
 
 			var promise = new Promise<Gee.List<PairingServiceHost>> ();
 			var hosts = new Gee.ArrayList<PairingServiceHost> ();
-			resolver.found.connect ((interface_index, protocol, name, type, domain, host, address_protocol, address, port, txt, flags) => {
-				printerr ("found! address=\"%s\"\n", address);
-				printerr ("on resolver: %p\n", resolver);
+			resolver.found.connect ((interface_index, protocol, name, type, domain, host, address_protocol, address, port, txt,
+					flags) => {
 				hosts.add (new LinuxPairingServiceHost (
 					host,
 					new InetSocketAddress.from_string (address, port),
@@ -103,28 +102,17 @@ namespace Frida.Fruity.XPC {
 					promise.resolve (hosts);
 			});
 			resolver.failure.connect (error => {
-				printerr ("failure: %s\n", error);
 				if (!promise.future.ready)
 					promise.reject (new Error.NOT_SUPPORTED ("%s", error));
 			});
 
 			try {
-				printerr (">>> start()\n");
 				yield resolver.start (cancellable);
-				printerr ("<<< start()\n");
 			} catch (GLib.Error e) {
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
 
-			try {
-				printerr (">>> wait_async()\n");
-				var x = yield promise.future.wait_async (cancellable);
-				printerr ("<<< wait_async()\n");
-				return x;
-			} catch (GLib.Error e) {
-				printerr ("!!! wait_async(): %s\n", e.message);
-				throw_api_error (e);
-			}
+			return yield promise.future.wait_async (cancellable);
 		}
 	}
 
@@ -166,12 +154,13 @@ namespace Frida.Fruity.XPC {
 
 	private const string AVAHI_SERVICE_NAME = "org.freedesktop.Avahi";
 
-	[DBus (name = "org.freedesktop.Avahi.Server")]
+	[DBus (name = "org.freedesktop.Avahi.Server2")]
 	private interface AvahiServer : Object {
-		public abstract async GLib.ObjectPath service_browser_new (int interface_index, AvahiProtocol protocol, string type,
+		public abstract async GLib.ObjectPath service_browser_prepare (int interface_index, AvahiProtocol protocol, string type,
 			string domain, uint flags, Cancellable? cancellable) throws GLib.Error;
-		public abstract async GLib.ObjectPath service_resolver_new (int interface_index, AvahiProtocol protocol, string name,
-			string type, string domain, AvahiProtocol aprotocol, uint flags, Cancellable? cancellable) throws GLib.Error;
+		public abstract async GLib.ObjectPath service_resolver_prepare (int interface_index, AvahiProtocol protocol, string name,
+			string type, string domain, AvahiProtocol aprotocol, AvahiLookupFlags flags, Cancellable? cancellable)
+			throws GLib.Error;
 	}
 
 	[DBus (name = "org.freedesktop.Avahi.ServiceBrowser")]
@@ -202,5 +191,13 @@ namespace Frida.Fruity.XPC {
 		INET,
 		INET6,
 		UNSPEC = -1,
+	}
+
+	[Flags]
+	private enum AvahiLookupFlags {
+		USE_WIDE_AREA = 1,
+		USE_MULTICAST = 2,
+		NO_TXT = 4,
+		NO_ADDRESS = 8,
 	}
 }
