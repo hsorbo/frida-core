@@ -1626,8 +1626,8 @@ namespace Frida.Fruity.XPC {
 
 			private LWIP.TcpPcb? pcb;
 			private IOCondition events = 0;
-			private ByteArray rx_buf = new ByteArray.sized (2048);
-			private ByteArray tx_buf = new ByteArray.sized (2048);
+			private ByteArray rx_buf = new ByteArray.sized (64 * 1024);
+			private ByteArray tx_buf = new ByteArray.sized (64 * 1024);
 			private size_t rx_bytes_to_acknowledge = 0;
 			private size_t tx_space_available = 0;
 
@@ -1859,8 +1859,12 @@ namespace Frida.Fruity.XPC {
 					rx_bytes_to_acknowledge = 0;
 				}
 
-				if (n != 0)
-					pcb.notify_received ((uint16) n);
+				size_t remainder = n;
+				while (remainder != 0) {
+					uint16 chunk = (uint16) size_t.min (remainder, uint16.MAX);
+					pcb.notify_received (chunk);
+					remainder -= chunk;
+				}
 			}
 
 			public ssize_t send (uint8[] buffer) throws IOError {
