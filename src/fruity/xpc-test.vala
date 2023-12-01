@@ -78,16 +78,19 @@ namespace Frida.Fruity.XPC {
 					continue;
 				}
 
-				foreach (InetSocketAddress address in yield host.resolve (cancellable)) {
-					string candidate_address = address.to_string ();
+				foreach (InetSocketAddress socket_address in yield host.resolve (cancellable)) {
+					string candidate_address = socket_address_to_string (socket_address) + "%" + service.interface_name;
 
 					SocketConnection connection;
 					try {
-						printerr ("Trying %s -> %s -> %s\n", service.to_string (), host.to_string (),
-							socket_address_to_string (address));
+						printerr ("Trying %s -> %s\n", service.to_string (), host.to_string ());
 						printerr ("\t(i.e., candidate_address: %s)\n", candidate_address);
 
-						NetworkAddress disco_address = NetworkAddress.parse (candidate_address, 58783);
+						InetSocketAddress? disco_address = new InetSocketAddress.from_string (candidate_address, 58783);
+						if (disco_address == null) {
+							printerr ("\tSkipping due to invalid address\n");
+							continue;
+						}
 
 						var client = new SocketClient ();
 						connection = yield client.connect_async (disco_address, cancellable);
@@ -175,13 +178,11 @@ namespace Frida.Fruity.XPC {
 				desc.append_c (':');
 			uint8 b1 = native[8 + j];
 			uint8 b2 = native[8 + j + 1];
-			bool all_zeroes = b1 == 0 && b2 == 0;
-			if (desc.len == 0 || !all_zeroes)
-				desc.append_printf ("%02x%02x", b1, b2);
+			desc.append_printf ("%02x%02x", b1, b2);
 		}
 
-		var scope_id = (uint32 *) ((uint8 *) native + 8 + 16);
+		//var scope_id = (uint32 *) ((uint8 *) native + 8 + 16);
 
-		return "(%s, scope_id: %u)".printf (desc.str, *scope_id);
+		return desc.str;
 	}
 }
