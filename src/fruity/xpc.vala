@@ -165,8 +165,8 @@ namespace Frida.Fruity.XPC {
 		private uint64 next_control_sequence_number = 0;
 		private uint64 next_encrypted_sequence_number = 0;
 
-		private string? host_identifier;
-		private Key? pair_record_key;
+		private string host_identifier;
+		private Key pair_record_key;
 		private ChaCha20Poly1305? client_cipher;
 		private ChaCha20Poly1305? server_cipher;
 
@@ -187,6 +187,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		construct {
+			Bytes? key = null;
 			try {
 				uint8[] raw_identity;
 				FileUtils.get_data (
@@ -195,13 +196,19 @@ namespace Frida.Fruity.XPC {
 				Plist identity = new Plist.from_data (raw_identity);
 
 				unowned string identifier = identity.get_string ("identifier");
-				Bytes key = identity.get_bytes ("privateKey");
+				key = identity.get_bytes ("privateKey");
 
 				host_identifier = identifier;
-				pair_record_key = new Key.from_raw_private_key (ED25519, null, key.get_data ());
 			} catch (GLib.Error e) {
 				printerr ("%s\n", e.message);
+				host_identifier = make_host_identifier ();
 			}
+			if (key == null) {
+				uint8 dummy_key[32] = { 0, };
+				key = new Bytes (dummy_key);
+			}
+
+			pair_record_key = new Key.from_raw_private_key (ED25519, null, key.get_data ());
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
@@ -216,7 +223,7 @@ namespace Frida.Fruity.XPC {
 
 			Bytes? shared_key = yield verify_manual_pairing (cancellable);
 			if (shared_key == null)
-				throw new Error.NOT_SUPPORTED ("Pairing not yet supported");
+				yield pair (cancellable);
 
 			client_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ClientEncrypt-main"));
 			server_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ServerEncrypt-main"));
@@ -348,9 +355,6 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async Bytes? verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
-			if (host_identifier == null || pair_record_key == null)
-				return null;
-
 			Key host_keypair = make_x25519_keypair ();
 
 			Bytes start_params = new PairingParamsBuilder ()
@@ -430,6 +434,29 @@ namespace Frida.Fruity.XPC {
 			}
 
 			return shared_key;
+		}
+
+		private async void pair (Cancellable? cancellable) throws Error, IOError {
+			Bytes setup_params = new PairingParamsBuilder ()
+				.add_method (0)
+				.add_state (1)
+				.build ();
+
+			Bytes setup_payload = new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("kind")
+					.add_string_value ("setupManualPairing")
+					.set_member_name ("startNewSession")
+					.add_bool_value (true)
+					.set_member_name ("sendingHost")
+					.add_string_value (Environment.get_host_name ())
+					.set_member_name ("data")
+					.add_data_value (setup_params)
+				.end_dictionary ()
+				.build ();
+
+			var setup_response = yield request_pairing_data (setup_payload, cancellable);
+			printerr ("setup_response=%s\n", variant_to_pretty_string (setup_response.current_object));
 		}
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable) throws Error, IOError {
@@ -612,6 +639,10 @@ namespace Frida.Fruity.XPC {
 			}
 		}
 
+		private static string make_host_identifier () {
+			return "6B9378A2-C12C-33C4-AB99-251FD52DF788"; // FIXME
+		}
+
 		private static Key make_x25519_keypair () {
 			var ctx = new KeyContext.for_key_type (X25519);
 			ctx.keygen_init ();
@@ -791,6 +822,13 @@ namespace Frida.Fruity.XPC {
 	private class PairingParamsBuilder {
 		private BufferBuilder builder = new BufferBuilder (LITTLE_ENDIAN);
 
+		public unowned PairingParamsBuilder add_method (uint8 method) {
+			begin_param (METHOD, 1)
+				.append_uint8 (method);
+
+			return this;
+		}
+
 		public unowned PairingParamsBuilder add_identifier (string identifier) {
 			begin_param (IDENTIFIER, identifier.data.length)
 				.append_data (identifier.data);
@@ -916,7 +954,9 @@ namespace Frida.Fruity.XPC {
 	}
 
 	private enum PairingParamType {
+		METHOD		= 0,
 		IDENTIFIER	= 1,
+		SALT		= 2,
 		PUBLIC_KEY	= 3,
 		ENCRYPTED_DATA	= 5,
 		STATE		= 6,
