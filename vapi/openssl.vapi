@@ -471,5 +471,8 @@ namespace OpenSSL {
 		public static int mod (ref BigNumber rem, BigNumber m, BigNumber d, BigNumberContext ctx);
 		public static int mod_exp_mont (ref BigNumber rr, BigNumber a, BigNumber p, BigNumber m, BigNumberContext ctx,
 			BigNumberMontgomeryContext * mont_ctx = null);
+
+		[CCode (cname = "BN_bn2binpad")]
+		public int to_big_endian_padded (uint8[] to);
 	}
 }
