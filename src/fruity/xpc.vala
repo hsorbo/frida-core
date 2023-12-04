@@ -457,6 +457,15 @@ namespace Frida.Fruity.XPC {
 
 			var setup_response = yield request_pairing_data (setup_payload, cancellable);
 			printerr ("setup_response=%s\n", variant_to_pretty_string (setup_response.current_object));
+
+			Bytes remote_pubkey = setup_response.read_member ("public-key").get_data_value ();
+			setup_response.end_member ();
+
+			Bytes salt = setup_response.read_member ("salt").get_data_value ();
+			setup_response.end_member ();
+
+			var srp_session = new SRPClientSession ("Pair-Setup", "000000");
+			srp_session.process (remote_pubkey, salt);
 		}
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable) throws Error, IOError {
@@ -482,8 +491,15 @@ namespace Frida.Fruity.XPC {
 				.read_member ("event")
 				.read_member ("_0");
 
-			if (!response.has_member ("pairingData"))
-				throw new Error.PROTOCOL ("Pairing request failed: %s", response.current_object.print (false));
+			if (response.has_member ("pairingRejectedWithError")) {
+				string description = response
+					.read_member ("pairingRejectedWithError")
+					.read_member ("wrappedError")
+					.read_member ("userInfo")
+					.read_member ("NSLocalizedDescription")
+					.get_string_value ();
+				throw new Error.PROTOCOL ("%s", description);
+			}
 
 			Bytes raw_data = response
 				.read_member ("pairingData")
@@ -805,6 +821,77 @@ namespace Frida.Fruity.XPC {
 				return cached_ctx;
 			}
 		}
+
+		private class SRPClientSession {
+			private string username;
+			private string password;
+
+			private BigNumber password_hash;
+			private BigNumber password_verifier;
+
+			private BigNumber prime = BigNumber.get_rfc3526_prime_3072 ();
+			private BigNumber gen;
+
+			private BigNumber local_pubkey;
+			private BigNumber local_privkey;
+
+			private BigNumber? remote_pubkey;
+			private Bytes? salt;
+
+			private BigNumberContext bn_ctx = new BigNumberContext.secure ();
+			private BigNumberMontgomeryContext = new BigNumberMontgomeryContext ();
+
+			public SRPClientSession (string username, string password) {
+				this.username = username;
+				this.password = password;
+
+				uint8 raw_gen = 5;
+				gen = new BigNumber.from_native ((uint8[]) &raw_gen);
+
+				uint8 raw_local_privkey[128];
+				Rng.generate (raw_local_privkey);
+				local_privkey = new BigNumber.from_big_endian (raw_local_privkey);
+
+				local_pubkey = new BigNumber ();
+				BigNumber.mod_exp_mont (ref local_pubkey, gen, local_privkey, prime, bn_ctx, mont_ctx);
+			}
+
+			public void process (Bytes raw_remote_pubkey, Bytes salt) {
+				this.salt = salt;
+
+				password_hash = compute_password_hash (salt);
+
+				password_verifier = new BigNumber ();
+				BigNumber.mod_exp_mont (ref password_verifier, gen, password_hash, prime, bn_ctx, mont_ctx);
+
+				remote_pubkey = new BigNumber.from_big_endian (raw_remote_pubkey.get_data ());
+				var rem = new BigNumber ();
+				BigNumber.mod (ref rem, remote_pubkey, prime, bn_ctx);
+				if (rem.is_zero ())
+					throw new Error.INVALID_ARGUMENT ("Malformed remote public key");
+			}
+
+			private BigNumber compute_password_hash (Bytes salt) {
+				uint8 buf[64];
+				size_t hash_len = buf.length;
+
+				var checksum = new Checksum (SHA512);
+				checksum.update (username.data);
+				checksum.update (":".data);
+				checksum.update (password.data);
+				checksum.get_digest (buf, ref hash_len);
+
+				var blob = new ByteArray.sized (salt.get_size () + buf.length);
+				blob.append (salt.get_data ());
+				blob.append (buf);
+
+				checksum = new Checksum (SHA512);
+				checksum.update (blob.data);
+				checksum.get_digest (buf, ref hash_len);
+
+				return new BigNumber.from_big_endian (buf);
+			}
+		}
 	}
 
 	public class DeviceInfo {
@@ -893,10 +980,9 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private Variant read_params () throws Error {
-			var builder = new VariantBuilder (VariantType.VARDICT);
-
 			var byte_array = new VariantType.array (VariantType.BYTE);
 
+			var parameters = new Gee.HashMap<string, Variant> ();
 			size_t size = buf.bytes.get_size ();
 			while (cursor != size) {
 				var raw_type = read_raw_uint8 ();
@@ -926,9 +1012,24 @@ namespace Frida.Fruity.XPC {
 						break;
 				}
 
-				builder.add ("{sv}", key, val);
+				Variant? existing_val = parameters[key];
+				if (existing_val != null) {
+					if (!existing_val.is_of_type (byte_array))
+						throw new Error.INVALID_ARGUMENT ("Unable to merge '%s' keys: unsupported type", key);
+					Bytes part1 = existing_val.get_data_as_bytes ();
+					Bytes part2 = val.get_data_as_bytes ();
+					var combined = new ByteArray.sized ((uint) (part1.get_size () + part2.get_size ()));
+					combined.append (part1.get_data ());
+					combined.append (part2.get_data ());
+					val = Variant.new_from_data (byte_array, combined.data, true, (owned) combined);
+				}
+
+				parameters[key] = val;
 			}
 
+			var builder = new VariantBuilder (VariantType.VARDICT);
+			foreach (var e in parameters.entries)
+				builder.add ("{sv}", e.key, e.value);
 			return builder.end ();
 		}
 
