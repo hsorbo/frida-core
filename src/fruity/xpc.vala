@@ -830,7 +830,7 @@ namespace Frida.Fruity.XPC {
 			private BigNumber password_verifier;
 
 			private BigNumber prime = BigNumber.get_rfc3526_prime_3072 ();
-			private BigNumber gen;
+			private BigNumber generator;
 
 			private BigNumber local_pubkey;
 			private BigNumber local_privkey;
@@ -839,57 +839,86 @@ namespace Frida.Fruity.XPC {
 			private Bytes? salt;
 
 			private BigNumberContext bn_ctx = new BigNumberContext.secure ();
-			private BigNumberMontgomeryContext = new BigNumberMontgomeryContext ();
+			private BigNumberMontgomeryContext mont_ctx = new BigNumberMontgomeryContext ();
 
 			public SRPClientSession (string username, string password) {
 				this.username = username;
 				this.password = password;
 
 				uint8 raw_gen = 5;
-				gen = new BigNumber.from_native ((uint8[]) &raw_gen);
+				generator = new BigNumber.from_native ((uint8[]) &raw_gen);
 
 				uint8 raw_local_privkey[128];
 				Rng.generate (raw_local_privkey);
 				local_privkey = new BigNumber.from_big_endian (raw_local_privkey);
 
 				local_pubkey = new BigNumber ();
-				BigNumber.mod_exp_mont (ref local_pubkey, gen, local_privkey, prime, bn_ctx, mont_ctx);
+				BigNumber.mod_exp_mont (ref local_pubkey, generator, local_privkey, prime, bn_ctx, mont_ctx);
 			}
 
-			public void process (Bytes raw_remote_pubkey, Bytes salt) {
+			public void process (Bytes raw_remote_pubkey, Bytes salt) throws Error {
 				this.salt = salt;
 
-				password_hash = compute_password_hash (salt);
+				password_hash = new HashBuilder ()
+					.add_bytes (salt)
+					.add_bytes (new HashBuilder ()
+						.add_string (username)
+						.add_string (":")
+						.add_string (password)
+						.build_digest ())
+					.build_number ();
 
 				password_verifier = new BigNumber ();
-				BigNumber.mod_exp_mont (ref password_verifier, gen, password_hash, prime, bn_ctx, mont_ctx);
+				BigNumber.mod_exp_mont (ref password_verifier, generator, password_hash, prime, bn_ctx, mont_ctx);
 
 				remote_pubkey = new BigNumber.from_big_endian (raw_remote_pubkey.get_data ());
 				var rem = new BigNumber ();
 				BigNumber.mod (ref rem, remote_pubkey, prime, bn_ctx);
 				if (rem.is_zero ())
 					throw new Error.INVALID_ARGUMENT ("Malformed remote public key");
+
+				BigNumber common_secret = new HashBuilder ()
+					.add_number (local_pubkey)
+					.add_number (remote_pubkey)
+					.build_number ();
 			}
 
-			private BigNumber compute_password_hash (Bytes salt) {
-				uint8 buf[64];
-				size_t hash_len = buf.length;
+			private class HashBuilder {
+				private Checksum checksum = new Checksum (SHA512);
 
-				var checksum = new Checksum (SHA512);
-				checksum.update (username.data);
-				checksum.update (":".data);
-				checksum.update (password.data);
-				checksum.get_digest (buf, ref hash_len);
+				public unowned HashBuilder add_number (BigNumber val) {
+					uint8 buf[384];
+					val.to_big_endian_padded (buf);
+					return add_data (buf);
+				}
 
-				var blob = new ByteArray.sized (salt.get_size () + buf.length);
-				blob.append (salt.get_data ());
-				blob.append (buf);
+				public unowned HashBuilder add_string (string val) {
+					return add_data (val.data);
+				}
 
-				checksum = new Checksum (SHA512);
-				checksum.update (blob.data);
-				checksum.get_digest (buf, ref hash_len);
+				public unowned HashBuilder add_bytes (Bytes val) {
+					return add_data (val.get_data ());
+				}
 
-				return new BigNumber.from_big_endian (buf);
+				public unowned HashBuilder add_data (uint8[] val) {
+					checksum.update (val, val.length);
+					return this;
+				}
+
+				public Bytes build_digest () {
+					var buf = new uint8[64];
+					size_t len = buf.length;
+					checksum.get_digest (buf, ref len);
+					return new Bytes.take ((owned) buf);
+				}
+
+				public BigNumber build_number () {
+					uint8 buf[64];
+					size_t len = buf.length;
+					checksum.get_digest (buf, ref len);
+
+					return new BigNumber.from_big_endian (buf);
+				}
 			}
 		}
 	}
