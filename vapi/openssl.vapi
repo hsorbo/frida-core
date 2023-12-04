@@ -433,4 +433,43 @@ namespace OpenSSL {
 		[CCode (cname = "RAND_bytes")]
 		public int generate (uint8[] buf);
 	}
+
+	[Compact]
+	[CCode (cname = "BN_CTX", cprefix = "BN_CTX_")]
+	public class BigNumberContext {
+		[CCode (cname = "BN_CTX_secure_new")]
+		public BigNumberContext.secure ();
+	}
+
+	[Compact]
+	[CCode (cname = "BN_MONT_CTX", cprefix = "BN_MONT_CTX_")]
+	public class BigNumberMontgomeryContext {
+		public BigNumberMontgomeryContext ();
+	}
+
+	[Compact]
+	[CCode (cname = "BIGNUM", cprefix = "BN_")]
+	public class BigNumber {
+		public BigNumber ();
+		[CCode (cname = "BN_native2bn")]
+		public BigNumber.from_native (uint8[] data, BigNumber * ret = null);
+		[CCode (cname = "BN_bin2bn")]
+		public BigNumber.from_big_endian (uint8[] data, BigNumber * ret = null);
+
+		public static BigNumber get_rfc2409_prime_768 (BigNumber * ret = null);
+		public static BigNumber get_rfc2409_prime_1024 (BigNumber * ret = null);
+
+		public static BigNumber get_rfc3526_prime_1536 (BigNumber * ret = null);
+		public static BigNumber get_rfc3526_prime_2048 (BigNumber * ret = null);
+		public static BigNumber get_rfc3526_prime_3072 (BigNumber * ret = null);
+		public static BigNumber get_rfc3526_prime_4096 (BigNumber * ret = null);
+		public static BigNumber get_rfc3526_prime_6144 (BigNumber * ret = null);
+		public static BigNumber get_rfc3526_prime_8192 (BigNumber * ret = null);
+
+		public bool is_zero ();
+
+		public static int mod (ref BigNumber rem, BigNumber m, BigNumber d, BigNumberContext ctx);
+		public static int mod_exp_mont (ref BigNumber rr, BigNumber a, BigNumber p, BigNumber m, BigNumberContext ctx,
+			BigNumberMontgomeryContext * mont_ctx = null);
+	}
 }
