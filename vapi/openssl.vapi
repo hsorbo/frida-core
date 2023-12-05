@@ -1,4 +1,4 @@
-[CCode (gir_namespace = "OpenSSL", gir_version = "1.0")]
+[CCode (lower_case_cprefix = "OPENSSL_", gir_namespace = "OpenSSL", gir_version = "1.0")]
 namespace OpenSSL {
 	[Compact]
 	[CCode (cname = "SSL_CTX", cprefix = "SSL_CTX_")]
@@ -469,11 +469,28 @@ namespace OpenSSL {
 
 		public bool is_zero ();
 
-		public static int mod (ref BigNumber rem, BigNumber m, BigNumber d, BigNumberContext ctx);
-		public static int mod_exp_mont (ref BigNumber rr, BigNumber a, BigNumber p, BigNumber m, BigNumberContext ctx,
+		public static int add (BigNumber r, BigNumber a, BigNumber b);
+		public static int sub (BigNumber r, BigNumber a, BigNumber b);
+		public static int mul (BigNumber r, BigNumber a, BigNumber b, BigNumberContext ctx);
+		public static int mod (BigNumber rem, BigNumber m, BigNumber d, BigNumberContext ctx);
+		public static int mod_exp_mont (BigNumber rr, BigNumber a, BigNumber p, BigNumber m, BigNumberContext ctx,
 			BigNumberMontgomeryContext * mont_ctx = null);
+
+		public int num_bits ();
+		public int num_bytes ();
+
+		[CCode (cname = "BN_bn2bin")]
+		public int to_big_endian ([CCode (array_length = false)] uint8[] to);
 
 		[CCode (cname = "BN_bn2binpad")]
 		public int to_big_endian_padded (uint8[] to);
+
+		[CCode (cname = "BN_bn2dec")]
+		public char * to_string ();
+
+		[CCode (cname = "BN_bn2hex")]
+		public char * to_hex_string ();
 	}
+
+	public void free (void * addr);
 }
