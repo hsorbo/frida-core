@@ -456,7 +456,11 @@ namespace Frida.Fruity.XPC {
 				.build ();
 
 			var setup_response = yield request_pairing_data (setup_payload, cancellable);
-			printerr ("setup_response=%s\n", variant_to_pretty_string (setup_response.current_object));
+
+			if (setup_response.has_member ("retry-delay")) {
+				uint8 retry_delay = setup_response.read_member ("retry-delay").get_uint8_value ();
+				throw new Error.INVALID_OPERATION ("Rate limit exceeded, try again in %u seconds", retry_delay);
+			}
 
 			Bytes remote_pubkey = setup_response.read_member ("public-key").get_data_value ();
 			setup_response.end_member ();
@@ -826,17 +830,23 @@ namespace Frida.Fruity.XPC {
 			private string username;
 			private string password;
 
-			private BigNumber password_hash;
-			private BigNumber password_verifier;
-
 			private BigNumber prime = BigNumber.get_rfc3526_prime_3072 ();
 			private BigNumber generator;
+			private BigNumber multiplier;
 
-			private BigNumber local_pubkey;
 			private BigNumber local_privkey;
+			private BigNumber local_pubkey;
 
 			private BigNumber? remote_pubkey;
 			private Bytes? salt;
+
+			private BigNumber? password_hash;
+			private BigNumber? password_verifier;
+
+			private BigNumber? common_secret;
+			private BigNumber? premaster_secret;
+			private BigNumber? key;
+			private Bytes? key_proof;
 
 			private BigNumberContext bn_ctx = new BigNumberContext.secure ();
 			private BigNumberMontgomeryContext mont_ctx = new BigNumberMontgomeryContext ();
@@ -847,19 +857,44 @@ namespace Frida.Fruity.XPC {
 
 				uint8 raw_gen = 5;
 				generator = new BigNumber.from_native ((uint8[]) &raw_gen);
+				multiplier = new HashBuilder ()
+					.add_number_padded (prime)
+					.add_number_padded (generator)
+					.build_number ();
 
 				uint8 raw_local_privkey[128];
 				Rng.generate (raw_local_privkey);
 				local_privkey = new BigNumber.from_big_endian (raw_local_privkey);
 
 				local_pubkey = new BigNumber ();
-				BigNumber.mod_exp_mont (ref local_pubkey, generator, local_privkey, prime, bn_ctx, mont_ctx);
+				BigNumber.mod_exp_mont (local_pubkey, generator, local_privkey, prime, bn_ctx, mont_ctx);
 			}
 
 			public void process (Bytes raw_remote_pubkey, Bytes salt) throws Error {
+				remote_pubkey = new BigNumber.from_big_endian (raw_remote_pubkey.get_data ());
+				var rem = new BigNumber ();
+				BigNumber.mod (rem, remote_pubkey, prime, bn_ctx);
+				if (rem.is_zero ())
+					throw new Error.INVALID_ARGUMENT ("Malformed remote public key");
+
 				this.salt = salt;
 
-				password_hash = new HashBuilder ()
+				password_hash = compute_password_hash (salt);
+				password_verifier = compute_password_verifier (password_hash);
+
+				common_secret = compute_common_secret (remote_pubkey);
+				premaster_secret = compute_premaster_secret (common_secret, remote_pubkey, password_hash,
+					password_verifier);
+				key = compute_session_key (premaster_secret);
+				key_proof = compute_session_key_proof (key, remote_pubkey, salt);
+
+				char * str = key.to_hex_string ();
+				printerr ("Computed key: %s\n", (string) str);
+				OpenSSL.free (str);
+			}
+
+			private BigNumber compute_password_hash (Bytes salt) {
+				return new HashBuilder ()
 					.add_bytes (salt)
 					.add_bytes (new HashBuilder ()
 						.add_string (username)
@@ -867,26 +902,78 @@ namespace Frida.Fruity.XPC {
 						.add_string (password)
 						.build_digest ())
 					.build_number ();
+			}
 
-				password_verifier = new BigNumber ();
-				BigNumber.mod_exp_mont (ref password_verifier, generator, password_hash, prime, bn_ctx, mont_ctx);
+			private BigNumber compute_password_verifier (BigNumber password_hash) {
+				var verifier = new BigNumber ();
+				BigNumber.mod_exp_mont (verifier, generator, password_hash, prime, bn_ctx, mont_ctx);
+				return verifier;
+			}
 
-				remote_pubkey = new BigNumber.from_big_endian (raw_remote_pubkey.get_data ());
-				var rem = new BigNumber ();
-				BigNumber.mod (ref rem, remote_pubkey, prime, bn_ctx);
-				if (rem.is_zero ())
-					throw new Error.INVALID_ARGUMENT ("Malformed remote public key");
+			private BigNumber compute_common_secret (BigNumber remote_pubkey) {
+				return new HashBuilder ()
+					.add_number_padded (local_pubkey)
+					.add_number_padded (remote_pubkey)
+					.build_number ();
+			}
 
-				BigNumber common_secret = new HashBuilder ()
+			private BigNumber compute_premaster_secret (BigNumber common_secret, BigNumber remote_pubkey,
+					BigNumber password_hash, BigNumber password_verifier) {
+				printerr ("common_secret=%p remote_pubkey=%p password_hash=%p password_verifier=%p\n",
+					common_secret,
+					remote_pubkey,
+					password_hash,
+					password_verifier);
+				var val = new BigNumber ();
+
+				BigNumber.mul (val, multiplier, password_verifier, bn_ctx);
+				var baze = new BigNumber ();
+				BigNumber.sub (baze, remote_pubkey, val);
+
+				var exp = new BigNumber ();
+				BigNumber.mul (val, common_secret, password_hash, bn_ctx);
+				BigNumber.add (exp, local_privkey, val);
+
+				BigNumber.mod_exp_mont (val, baze, exp, prime, bn_ctx, mont_ctx);
+
+				return val;
+			}
+
+			private static BigNumber compute_session_key (BigNumber premaster_secret) {
+				return new HashBuilder ()
+					.add_number (premaster_secret)
+					.build_number ();
+			}
+
+			private Bytes compute_session_key_proof (BigNumber session_key, BigNumber remote_pubkey, Bytes salt) {
+				Bytes prime_hash = new HashBuilder ().add_number (prime).build_digest ();
+				Bytes generator_hash = new HashBuilder ().add_number (generator).build_digest ();
+				uint8 prime_and_generator_xored[64];
+				unowned uint8[] left = prime_hash.get_data ();
+				unowned uint8[] right = generator_hash.get_data ();
+				for (var i = 0; i != prime_and_generator_xored.length; i++)
+					prime_and_generator_xored[i] = left[i] ^ right[i];
+
+				return new HashBuilder ()
+					.add_data (prime_and_generator_xored)
+					.add_bytes (new HashBuilder ().add_string (username).build_digest ())
+					.add_bytes (salt)
 					.add_number (local_pubkey)
 					.add_number (remote_pubkey)
-					.build_number ();
+					.add_number (session_key)
+					.build_digest ();
 			}
 
 			private class HashBuilder {
 				private Checksum checksum = new Checksum (SHA512);
 
 				public unowned HashBuilder add_number (BigNumber val) {
+					var buf = new uint8[val.num_bytes ()];
+					val.to_big_endian (buf);
+					return add_data (buf);
+				}
+
+				public unowned HashBuilder add_number_padded (BigNumber val) {
 					uint8 buf[384];
 					val.to_big_endian_padded (buf);
 					return add_data (buf);
@@ -916,7 +1003,6 @@ namespace Frida.Fruity.XPC {
 					uint8 buf[64];
 					size_t len = buf.length;
 					checksum.get_digest (buf, ref len);
-
 					return new BigNumber.from_big_endian (buf);
 				}
 			}
@@ -1027,13 +1113,10 @@ namespace Frida.Fruity.XPC {
 				Variant val;
 				switch (type) {
 					case STATE:
-						if (val_bytes.length != 1)
-							throw new Error.INVALID_ARGUMENT ("Invalid state value");
-						val = new Variant.byte (val_bytes[0]);
-						break;
 					case ERROR:
+					case RETRY_DELAY:
 						if (val_bytes.length != 1)
-							throw new Error.INVALID_ARGUMENT ("Invalid error value");
+							throw new Error.INVALID_ARGUMENT ("Invalid value");
 						val = new Variant.byte (val_bytes[0]);
 						break;
 					default:
@@ -1091,6 +1174,7 @@ namespace Frida.Fruity.XPC {
 		ENCRYPTED_DATA	= 5,
 		STATE		= 6,
 		ERROR		= 7,
+		RETRY_DELAY	= 8,
 		SIGNATURE	= 10,
 	}
 
@@ -3759,6 +3843,10 @@ namespace Frida.Fruity.XPC {
 
 		public bool get_bool_value () throws Error {
 			return peek_scope ().get_value (VariantType.BOOLEAN).get_boolean ();
+		}
+
+		public uint8 get_uint8_value () throws Error {
+			return peek_scope ().get_value (VariantType.BYTE).get_byte ();
 		}
 
 		public int64 get_int64_value () throws Error {
