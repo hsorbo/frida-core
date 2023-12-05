@@ -443,12 +443,6 @@ namespace OpenSSL {
 	}
 
 	[Compact]
-	[CCode (cname = "BN_MONT_CTX", cprefix = "BN_MONT_CTX_")]
-	public class BigNumberMontgomeryContext {
-		public BigNumberMontgomeryContext ();
-	}
-
-	[Compact]
 	[CCode (cname = "BIGNUM", cprefix = "BN_")]
 	public class BigNumber {
 		public BigNumber ();
@@ -473,8 +467,7 @@ namespace OpenSSL {
 		public static int sub (BigNumber r, BigNumber a, BigNumber b);
 		public static int mul (BigNumber r, BigNumber a, BigNumber b, BigNumberContext ctx);
 		public static int mod (BigNumber rem, BigNumber m, BigNumber d, BigNumberContext ctx);
-		public static int mod_exp_mont (BigNumber rr, BigNumber a, BigNumber p, BigNumber m, BigNumberContext ctx,
-			BigNumberMontgomeryContext * mont_ctx = null);
+		public static int mod_exp (BigNumber r, BigNumber a, BigNumber p, BigNumber m, BigNumberContext ctx);
 
 		public int num_bits ();
 		public int num_bytes ();
@@ -490,6 +483,17 @@ namespace OpenSSL {
 
 		[CCode (cname = "BN_bn2hex")]
 		public char * to_hex_string ();
+	}
+
+	[CCode (cheader_filename = "openssl/crypto.h", lower_case_cprefix = "CRYPTO_")]
+	namespace Crypto {
+		public int memcmp (void * a, void * b, size_t len);
+	}
+
+	[CCode (lower_case_cprefix = "ERR_")]
+	namespace Error {
+		public ulong get_error ();
+		public void error_string_n (ulong e, char[] buf);
 	}
 
 	public void free (void * addr);
