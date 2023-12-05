@@ -165,6 +165,7 @@ namespace Frida.Fruity.XPC {
 		private uint64 next_control_sequence_number = 0;
 		private uint64 next_encrypted_sequence_number = 0;
 
+		private File config_file;
 		private string host_identifier;
 		private Key pair_record_key;
 		private ChaCha20Poly1305? client_cipher;
@@ -187,12 +188,17 @@ namespace Frida.Fruity.XPC {
 		}
 
 		construct {
+#if DARWIN
+			config_file = File.new_for_path ("/var/db/lockdown/RemotePairing/user_%u/selfIdentity.plist".printf (
+				(uint) Posix.getuid ()));
+#else
+			config_file = File.new_build_filename (Environment.get_user_config_dir (), "frida", "remote-xpc.plist");
+#endif
+
 			Bytes? key = null;
 			try {
 				uint8[] raw_identity;
-				FileUtils.get_data (
-					"/var/db/lockdown/RemotePairing/user_%u/selfIdentity.plist".printf ((uint) Posix.getuid ()),
-					out raw_identity);
+				FileUtils.get_data (config_file.get_path (), out raw_identity);
 				Plist identity = new Plist.from_data (raw_identity);
 
 				unowned string identifier = identity.get_string ("identifier");
@@ -222,10 +228,8 @@ namespace Frida.Fruity.XPC {
 			yield attempt_pair_verify (cancellable);
 
 			Bytes? shared_key = yield verify_manual_pairing (cancellable);
-			if (shared_key == null) {
-				yield pair (cancellable);
-				throw new Error.NOT_SUPPORTED ("TODO");
-			}
+			if (shared_key == null)
+				shared_key = yield setup_manual_pairing (cancellable);
 
 			client_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ClientEncrypt-main"));
 			server_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ServerEncrypt-main"));
@@ -238,7 +242,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public async TunnelConnection establish (string device_address, Cancellable? cancellable = null) throws Error, IOError {
-			Key local_keypair = make_rsa_keypair ();
+			Key local_keypair = make_keypair (RSA);
 
 			string request = Json.to_string (
 				new Json.Builder ()
@@ -357,7 +361,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async Bytes? verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
-			Key host_keypair = make_x25519_keypair ();
+			Key host_keypair = make_keypair (X25519);
 
 			Bytes start_params = new PairingParamsBuilder ()
 				.add_state (1)
@@ -438,13 +442,13 @@ namespace Frida.Fruity.XPC {
 			return shared_key;
 		}
 
-		private async void pair (Cancellable? cancellable) throws Error, IOError {
-			Bytes setup_params = new PairingParamsBuilder ()
+		private async Bytes setup_manual_pairing (Cancellable? cancellable) throws Error, IOError {
+			Bytes start_params = new PairingParamsBuilder ()
 				.add_method (0)
 				.add_state (1)
 				.build ();
 
-			Bytes setup_payload = new ObjectBuilder ()
+			Bytes start_payload = new ObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("kind")
 					.add_string_value ("setupManualPairing")
@@ -453,24 +457,25 @@ namespace Frida.Fruity.XPC {
 					.set_member_name ("sendingHost")
 					.add_string_value (Environment.get_host_name ())
 					.set_member_name ("data")
-					.add_data_value (setup_params)
+					.add_data_value (start_params)
 				.end_dictionary ()
 				.build ();
 
-			var setup_response = yield request_pairing_data (setup_payload, cancellable);
-			if (setup_response.has_member ("retry-delay")) {
-				uint16 retry_delay = setup_response.read_member ("retry-delay").get_uint16_value ();
+			var start_response = yield request_pairing_data (start_payload, cancellable);
+			if (start_response.has_member ("retry-delay")) {
+				uint16 retry_delay = start_response.read_member ("retry-delay").get_uint16_value ();
 				throw new Error.INVALID_OPERATION ("Rate limit exceeded, try again in %u seconds", retry_delay);
 			}
 
-			Bytes remote_pubkey = setup_response.read_member ("public-key").get_data_value ();
-			setup_response.end_member ();
+			Bytes remote_pubkey = start_response.read_member ("public-key").get_data_value ();
+			start_response.end_member ();
 
-			Bytes salt = setup_response.read_member ("salt").get_data_value ();
-			setup_response.end_member ();
+			Bytes salt = start_response.read_member ("salt").get_data_value ();
+			start_response.end_member ();
 
 			var srp_session = new SRPClientSession ("Pair-Setup", "000000");
 			srp_session.process (remote_pubkey, salt);
+			Bytes shared_key = srp_session.key;
 
 			Bytes verify_params = new PairingParamsBuilder ()
 				.add_state (3)
@@ -492,8 +497,82 @@ namespace Frida.Fruity.XPC {
 				.build ();
 
 			var verify_response = yield request_pairing_data (verify_payload, cancellable);
+			Bytes remote_proof = verify_response.read_member ("proof").get_data_value ();
 
-			srp_session.verify_proof (verify_response.read_member ("proof").get_data_value ());
+			srp_session.verify_proof (remote_proof);
+
+			Bytes operation_key = derive_chacha_key (shared_key,
+				"Pair-Setup-Encrypt-Info",
+				"Pair-Setup-Encrypt-Salt");
+
+			var cipher = new ChaCha20Poly1305 (operation_key);
+
+			Key new_pair_record_key = make_keypair (ED25519);
+
+			Bytes signing_key = derive_chacha_key (shared_key,
+				"Pair-Setup-Controller-Sign-Info",
+				"Pair-Setup-Controller-Sign-Salt");
+
+			var message = new ByteArray.sized (100);
+			message.append (signing_key.get_data ());
+			message.append (host_identifier.data);
+			message.append (get_raw_public_key (new_pair_record_key).get_data ());
+			Bytes signature = compute_message_signature (new Bytes.static (message.data), new_pair_record_key);
+
+			// TODO: Wire up opack serialization
+			Bytes info = new Bytes.take (Base64.decode ("50RuYW1lRmZlZG9yYUlhY2NvdW50SURhJDZCOTM3OEEyLUMxMkMtMzNDNC1BQjk5LTI1MUZENTJERjc4OFtyZW1vdGVwYWlyaW5nX3NlcmlhbF9udW1iZXJMQUFBQUFBQUFBQUFBRmFsdElSS4Dp6C3Aakl5a1ZvVAAZscd7RW1vZGVsTmNvbXB1dGVyLW1vZGVsQ21hY3YRIjNEVWZGYnRBZGRyUTExOjIyOjMzOjQ0OjU1OjY2"));
+
+			Bytes inner_params = new PairingParamsBuilder ()
+				.add_identifier (host_identifier)
+				.add_public_key (new_pair_record_key)
+				.add_signature (signature)
+				.add_info (info)
+				.build ();
+
+			Bytes outer_params = new PairingParamsBuilder ()
+				.add_state (5)
+				.add_encrypted_data (
+					cipher.encrypt (
+						new Bytes.static ("\x00\x00\x00\x00PS-Msg05".data[:12]),
+						inner_params))
+				.build ();
+
+			Bytes finish_payload = new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("kind")
+					.add_string_value ("setupManualPairing")
+					.set_member_name ("startNewSession")
+					.add_bool_value (false)
+					.set_member_name ("sendingHost")
+					.add_string_value (Environment.get_host_name ())
+					.set_member_name ("data")
+					.add_data_value (outer_params)
+				.end_dictionary ()
+				.build ();
+
+			var finish_response = yield request_pairing_data (finish_payload, cancellable);
+
+			Bytes encrypted_response = finish_response.read_member ("encrypted-data").get_data_value ();
+			Bytes raw_response = cipher.decrypt (new Bytes.static ("\x00\x00\x00\x00PS-Msg06".data[:12]), encrypted_response);
+			Variant response = PairingParamsParser.parse (raw_response.get_data ());
+			printerr ("Got response: %s\n", variant_to_pretty_string (response));
+
+			var config = new Plist ();
+			config.set_string ("identifier", host_identifier);
+			config.set_bytes ("privateKey", get_raw_private_key (new_pair_record_key));
+			try {
+				config_file.get_parent ().make_directory_with_parents (cancellable);
+			} catch (GLib.Error e) {
+			}
+			try {
+				FileUtils.set_contents (config_file.get_path (), config.to_xml ());
+			} catch (GLib.Error e) {
+				throw new Error.NOT_SUPPORTED ("%s", e.message);
+			}
+
+			pair_record_key = (owned) new_pair_record_key;
+
+			return shared_key;
 		}
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable) throws Error, IOError {
@@ -687,18 +766,8 @@ namespace Frida.Fruity.XPC {
 			return "6B9378A2-C12C-33C4-AB99-251FD52DF788"; // FIXME
 		}
 
-		private static Key make_x25519_keypair () {
-			var ctx = new KeyContext.for_key_type (X25519);
-			ctx.keygen_init ();
-
-			Key? keypair = null;
-			ctx.keygen (ref keypair);
-
-			return keypair;
-		}
-
-		private static Key make_rsa_keypair () {
-			var ctx = new KeyContext.for_key_type (RSA);
+		private static Key make_keypair (KeyType type) {
+			var ctx = new KeyContext.for_key_type (type);
 			ctx.keygen_init ();
 
 			Key? keypair = null;
@@ -859,6 +928,12 @@ namespace Frida.Fruity.XPC {
 				}
 			}
 
+			public Bytes key {
+				get {
+					return _key;
+				}
+			}
+
 			public Bytes key_proof {
 				get {
 					return _key_proof;
@@ -883,7 +958,7 @@ namespace Frida.Fruity.XPC {
 
 			private BigNumber? common_secret;
 			private BigNumber? premaster_secret;
-			private BigNumber? key;
+			private Bytes? _key;
 			private Bytes? _key_proof;
 			private Bytes? _key_proof_hash;
 
@@ -923,9 +998,9 @@ namespace Frida.Fruity.XPC {
 				common_secret = compute_common_secret (remote_pubkey);
 				premaster_secret = compute_premaster_secret (common_secret, remote_pubkey, password_hash,
 					password_verifier);
-				key = compute_session_key (premaster_secret);
-				_key_proof = compute_session_key_proof (key, remote_pubkey, salt);
-				_key_proof_hash = compute_session_key_proof_hash (_key_proof, key);
+				_key = compute_session_key (premaster_secret);
+				_key_proof = compute_session_key_proof (_key, remote_pubkey, salt);
+				_key_proof_hash = compute_session_key_proof_hash (_key_proof, _key);
 			}
 
 			public void verify_proof (Bytes proof) throws Error {
@@ -978,13 +1053,13 @@ namespace Frida.Fruity.XPC {
 				return val;
 			}
 
-			private static BigNumber compute_session_key (BigNumber premaster_secret) {
+			private static Bytes compute_session_key (BigNumber premaster_secret) {
 				return new HashBuilder ()
 					.add_number (premaster_secret)
-					.build_number ();
+					.build_digest ();
 			}
 
-			private Bytes compute_session_key_proof (BigNumber session_key, BigNumber remote_pubkey, Bytes salt) {
+			private Bytes compute_session_key_proof (Bytes session_key, BigNumber remote_pubkey, Bytes salt) {
 				Bytes prime_hash = new HashBuilder ().add_number (prime).build_digest ();
 				Bytes generator_hash = new HashBuilder ().add_number (generator).build_digest ();
 				uint8 prime_and_generator_xored[64];
@@ -999,15 +1074,15 @@ namespace Frida.Fruity.XPC {
 					.add_bytes (salt)
 					.add_number (local_pubkey)
 					.add_number (remote_pubkey)
-					.add_number (session_key)
+					.add_bytes (session_key)
 					.build_digest ();
 			}
 
-			private Bytes compute_session_key_proof_hash (Bytes key_proof, BigNumber key) {
+			private Bytes compute_session_key_proof_hash (Bytes key_proof, Bytes key) {
 				return new HashBuilder ()
 					.add_number (local_pubkey)
 					.add_bytes (key_proof)
-					.add_number (key)
+					.add_bytes (key)
 					.build_digest ();
 			}
 
@@ -1090,31 +1165,15 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public unowned PairingParamsBuilder add_raw_public_key (Bytes key) {
-			unowned uint8[] data = key.get_data ();
-
-			uint cursor = 0;
-			do {
-				uint n = uint.min (data.length - cursor, uint8.MAX);
-				begin_param (PUBLIC_KEY, n)
-					.append_data (data[cursor:cursor + n]);
-				cursor += n;
-			} while (cursor != data.length);
-
-			return this;
+			return add_blob (PUBLIC_KEY, key);
 		}
 
 		public unowned PairingParamsBuilder add_proof (Bytes proof) {
-			begin_param (PROOF, proof.length)
-				.append_bytes (proof);
-
-			return this;
+			return add_blob (PROOF, proof);
 		}
 
 		public unowned PairingParamsBuilder add_encrypted_data (Bytes bytes) {
-			begin_param (ENCRYPTED_DATA, bytes.length)
-				.append_bytes (bytes);
-
-			return this;
+			return add_blob (ENCRYPTED_DATA, bytes);
 		}
 
 		public unowned PairingParamsBuilder add_state (uint8 state) {
@@ -1125,8 +1184,23 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public unowned PairingParamsBuilder add_signature (Bytes signature) {
-			begin_param (SIGNATURE, signature.length)
-				.append_bytes (signature);
+			return add_blob (SIGNATURE, signature);
+		}
+
+		public unowned PairingParamsBuilder add_info (Bytes info) {
+			return add_blob (INFO, info);
+		}
+
+		private unowned PairingParamsBuilder add_blob (PairingParamType type, Bytes blob) {
+			unowned uint8[] data = blob.get_data ();
+
+			uint cursor = 0;
+			do {
+				uint n = uint.min (data.length - cursor, uint8.MAX);
+				begin_param (type, n)
+					.append_data (data[cursor:cursor + n]);
+				cursor += n;
+			} while (cursor != data.length);
 
 			return this;
 		}
@@ -1254,8 +1328,9 @@ namespace Frida.Fruity.XPC {
 		ENCRYPTED_DATA,
 		STATE,
 		ERROR,
-		RETRY_DELAY  /* = 8 */,
-		SIGNATURE	= 10,
+		RETRY_DELAY /* = 8 */,
+		SIGNATURE = 10,
+		INFO = 17,
 	}
 
 	public sealed class TunnelConnection : Object, AsyncInitable {
@@ -4006,10 +4081,20 @@ namespace Frida.Fruity.XPC {
 		size_t size = 0;
 		key.get_raw_public_key (null, ref size);
 
-		var pubkey = new uint8[size];
-		key.get_raw_public_key (pubkey, ref size);
+		var result = new uint8[size];
+		key.get_raw_public_key (result, ref size);
 
-		return new Bytes.take ((owned) pubkey);
+		return new Bytes.take ((owned) result);
+	}
+
+	private Bytes get_raw_private_key (Key key) {
+		size_t size = 0;
+		key.get_raw_private_key (null, ref size);
+
+		var result = new uint8[size];
+		key.get_raw_private_key (result, ref size);
+
+		return new Bytes.take ((owned) result);
 	}
 
 	// https://gist.github.com/phako/96b36b5070beaf7eee27
