@@ -3,7 +3,7 @@ namespace Frida.Fruity.XPC {
 	using OpenSSL;
 	using OpenSSL.Envelope;
 
-	private const string PAIRING_REGTYPE = "_remotepairing._tcp";
+	private const string PAIRING_REGTYPE = "_remoted._tcp";
 	private const string PAIRING_DOMAIN = "local.";
 
 	public interface PairingBrowser : Object {
@@ -222,8 +222,10 @@ namespace Frida.Fruity.XPC {
 			yield attempt_pair_verify (cancellable);
 
 			Bytes? shared_key = yield verify_manual_pairing (cancellable);
-			if (shared_key == null)
+			if (shared_key == null) {
 				yield pair (cancellable);
+				throw new Error.NOT_SUPPORTED ("TODO");
+			}
 
 			client_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ClientEncrypt-main"));
 			server_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ServerEncrypt-main"));
@@ -456,9 +458,8 @@ namespace Frida.Fruity.XPC {
 				.build ();
 
 			var setup_response = yield request_pairing_data (setup_payload, cancellable);
-
 			if (setup_response.has_member ("retry-delay")) {
-				uint8 retry_delay = setup_response.read_member ("retry-delay").get_uint8_value ();
+				uint16 retry_delay = setup_response.read_member ("retry-delay").get_uint16_value ();
 				throw new Error.INVALID_OPERATION ("Rate limit exceeded, try again in %u seconds", retry_delay);
 			}
 
@@ -470,6 +471,29 @@ namespace Frida.Fruity.XPC {
 
 			var srp_session = new SRPClientSession ("Pair-Setup", "000000");
 			srp_session.process (remote_pubkey, salt);
+
+			Bytes verify_params = new PairingParamsBuilder ()
+				.add_state (3)
+				.add_raw_public_key (srp_session.public_key)
+				.add_proof (srp_session.key_proof)
+				.build ();
+
+			Bytes verify_payload = new ObjectBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("kind")
+					.add_string_value ("setupManualPairing")
+					.set_member_name ("startNewSession")
+					.add_bool_value (false)
+					.set_member_name ("sendingHost")
+					.add_string_value (Environment.get_host_name ())
+					.set_member_name ("data")
+					.add_data_value (verify_params)
+				.end_dictionary ()
+				.build ();
+
+			var verify_response = yield request_pairing_data (verify_payload, cancellable);
+
+			srp_session.verify_proof (verify_response.read_member ("proof").get_data_value ());
 		}
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable) throws Error, IOError {
@@ -827,6 +851,20 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private class SRPClientSession {
+			public Bytes public_key {
+				owned get {
+					var buf = new uint8[local_pubkey.num_bytes ()];
+					local_pubkey.to_big_endian (buf);
+					return new Bytes.take ((owned) buf);
+				}
+			}
+
+			public Bytes key_proof {
+				get {
+					return _key_proof;
+				}
+			}
+
 			private string username;
 			private string password;
 
@@ -846,10 +884,10 @@ namespace Frida.Fruity.XPC {
 			private BigNumber? common_secret;
 			private BigNumber? premaster_secret;
 			private BigNumber? key;
-			private Bytes? key_proof;
+			private Bytes? _key_proof;
+			private Bytes? _key_proof_hash;
 
 			private BigNumberContext bn_ctx = new BigNumberContext.secure ();
-			private BigNumberMontgomeryContext mont_ctx = new BigNumberMontgomeryContext ();
 
 			public SRPClientSession (string username, string password) {
 				this.username = username;
@@ -867,7 +905,7 @@ namespace Frida.Fruity.XPC {
 				local_privkey = new BigNumber.from_big_endian (raw_local_privkey);
 
 				local_pubkey = new BigNumber ();
-				BigNumber.mod_exp_mont (local_pubkey, generator, local_privkey, prime, bn_ctx, mont_ctx);
+				BigNumber.mod_exp (local_pubkey, generator, local_privkey, prime, bn_ctx);
 			}
 
 			public void process (Bytes raw_remote_pubkey, Bytes salt) throws Error {
@@ -886,11 +924,17 @@ namespace Frida.Fruity.XPC {
 				premaster_secret = compute_premaster_secret (common_secret, remote_pubkey, password_hash,
 					password_verifier);
 				key = compute_session_key (premaster_secret);
-				key_proof = compute_session_key_proof (key, remote_pubkey, salt);
+				_key_proof = compute_session_key_proof (key, remote_pubkey, salt);
+				_key_proof_hash = compute_session_key_proof_hash (_key_proof, key);
+			}
 
-				char * str = key.to_hex_string ();
-				printerr ("Computed key: %s\n", (string) str);
-				OpenSSL.free (str);
+			public void verify_proof (Bytes proof) throws Error {
+				size_t size = proof.get_size ();
+				if (size != _key_proof_hash.get_size ())
+					throw new Error.INVALID_ARGUMENT ("Invalid proof size");
+
+				if (Crypto.memcmp (proof.get_data (), _key_proof_hash.get_data (), size) != 0)
+					throw new Error.INVALID_ARGUMENT ("Invalid proof");
 			}
 
 			private BigNumber compute_password_hash (Bytes salt) {
@@ -906,7 +950,7 @@ namespace Frida.Fruity.XPC {
 
 			private BigNumber compute_password_verifier (BigNumber password_hash) {
 				var verifier = new BigNumber ();
-				BigNumber.mod_exp_mont (verifier, generator, password_hash, prime, bn_ctx, mont_ctx);
+				BigNumber.mod_exp (verifier, generator, password_hash, prime, bn_ctx);
 				return verifier;
 			}
 
@@ -919,11 +963,6 @@ namespace Frida.Fruity.XPC {
 
 			private BigNumber compute_premaster_secret (BigNumber common_secret, BigNumber remote_pubkey,
 					BigNumber password_hash, BigNumber password_verifier) {
-				printerr ("common_secret=%p remote_pubkey=%p password_hash=%p password_verifier=%p\n",
-					common_secret,
-					remote_pubkey,
-					password_hash,
-					password_verifier);
 				var val = new BigNumber ();
 
 				BigNumber.mul (val, multiplier, password_verifier, bn_ctx);
@@ -934,7 +973,7 @@ namespace Frida.Fruity.XPC {
 				BigNumber.mul (val, common_secret, password_hash, bn_ctx);
 				BigNumber.add (exp, local_privkey, val);
 
-				BigNumber.mod_exp_mont (val, baze, exp, prime, bn_ctx, mont_ctx);
+				BigNumber.mod_exp (val, baze, exp, prime, bn_ctx);
 
 				return val;
 			}
@@ -961,6 +1000,14 @@ namespace Frida.Fruity.XPC {
 					.add_number (local_pubkey)
 					.add_number (remote_pubkey)
 					.add_number (session_key)
+					.build_digest ();
+			}
+
+			private Bytes compute_session_key_proof_hash (Bytes key_proof, BigNumber key) {
+				return new HashBuilder ()
+					.add_number (local_pubkey)
+					.add_bytes (key_proof)
+					.add_number (key)
 					.build_digest ();
 			}
 
@@ -1039,10 +1086,26 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public unowned PairingParamsBuilder add_public_key (Key key) {
-			Bytes pubkey = get_raw_public_key (key);
+			return add_raw_public_key (get_raw_public_key (key));
+		}
 
-			begin_param (PUBLIC_KEY, pubkey.length)
-				.append_bytes (pubkey);
+		public unowned PairingParamsBuilder add_raw_public_key (Bytes key) {
+			unowned uint8[] data = key.get_data ();
+
+			uint cursor = 0;
+			do {
+				uint n = uint.min (data.length - cursor, uint8.MAX);
+				begin_param (PUBLIC_KEY, n)
+					.append_data (data[cursor:cursor + n]);
+				cursor += n;
+			} while (cursor != data.length);
+
+			return this;
+		}
+
+		public unowned PairingParamsBuilder add_proof (Bytes proof) {
+			begin_param (PROOF, proof.length)
+				.append_bytes (proof);
 
 			return this;
 		}
@@ -1114,11 +1177,27 @@ namespace Frida.Fruity.XPC {
 				switch (type) {
 					case STATE:
 					case ERROR:
-					case RETRY_DELAY:
-						if (val_bytes.length != 1)
-							throw new Error.INVALID_ARGUMENT ("Invalid value");
+						if (val_bytes.length != 1) {
+							throw new Error.INVALID_ARGUMENT ("Invalid value for '%s': length=%d",
+								key, val_bytes.length);
+						}
 						val = new Variant.byte (val_bytes[0]);
 						break;
+					case RETRY_DELAY: {
+						uint16 delay;
+						switch (val_bytes.length) {
+							case 1:
+								delay = val_bytes[0];
+								break;
+							case 2:
+								delay = new Buffer (val_bytes, LITTLE_ENDIAN).read_uint16 (0);
+								break;
+							default:
+								throw new Error.INVALID_ARGUMENT ("Invalid value for 'retry-delay'");
+						}
+						val = new Variant.uint16 (delay);
+						break;
+					}
 					default:
 						val = Variant.new_from_data (byte_array, val_bytes.get_data (), true, val_bytes);
 						break;
@@ -1167,14 +1246,15 @@ namespace Frida.Fruity.XPC {
 	}
 
 	private enum PairingParamType {
-		METHOD		= 0,
-		IDENTIFIER	= 1,
-		SALT		= 2,
-		PUBLIC_KEY	= 3,
-		ENCRYPTED_DATA	= 5,
-		STATE		= 6,
-		ERROR		= 7,
-		RETRY_DELAY	= 8,
+		METHOD,
+		IDENTIFIER,
+		SALT,
+		PUBLIC_KEY,
+		PROOF,
+		ENCRYPTED_DATA,
+		STATE,
+		ERROR,
+		RETRY_DELAY  /* = 8 */,
 		SIGNATURE	= 10,
 	}
 
@@ -3847,6 +3927,10 @@ namespace Frida.Fruity.XPC {
 
 		public uint8 get_uint8_value () throws Error {
 			return peek_scope ().get_value (VariantType.BYTE).get_byte ();
+		}
+
+		public uint16 get_uint16_value () throws Error {
+			return peek_scope ().get_value (VariantType.UINT16).get_uint16 ();
 		}
 
 		public int64 get_int64_value () throws Error {
