@@ -507,6 +507,11 @@ namespace Frida.Fruity.XPC {
 			var cipher = new ChaCha20Poly1305 (operation_key);
 
 			Key new_pair_record_key = make_keypair (ED25519);
+			Bytes new_pair_record_pubkey = get_raw_public_key (new_pair_record_key);
+
+			uint8 raw_irk[16];
+			Rng.generate (raw_irk);
+			Bytes irk = new Bytes (raw_irk);
 
 			Bytes signing_key = derive_chacha_key (shared_key,
 				"Pair-Setup-Controller-Sign-Info",
@@ -515,7 +520,7 @@ namespace Frida.Fruity.XPC {
 			var message = new ByteArray.sized (100);
 			message.append (signing_key.get_data ());
 			message.append (host_identifier.data);
-			message.append (get_raw_public_key (new_pair_record_key).get_data ());
+			message.append (new_pair_record_pubkey.get_data ());
 			Bytes signature = compute_message_signature (new Bytes.static (message.data), new_pair_record_key);
 
 			Bytes info = new OpackBuilder ()
@@ -527,10 +532,7 @@ namespace Frida.Fruity.XPC {
 					.set_member_name ("remotepairing_serial_number")
 					.add_string_value ("AAAAAAAAAAAA")
 					.set_member_name ("altIRK")
-					.add_data_value (new Bytes ({
-						0xe9, 0xe8, 0x2d, 0xc0, 0x6a, 0x49, 0x79, 0x6b,
-						0x56, 0x6f, 0x54, 0x00, 0x19, 0xb1, 0xc7, 0x7b
-					}))
+					.add_data_value (irk)
 					.set_member_name ("model")
 					.add_string_value ("computer-model")
 					.set_member_name ("mac")
@@ -542,7 +544,7 @@ namespace Frida.Fruity.XPC {
 
 			Bytes inner_params = new PairingParamsBuilder ()
 				.add_identifier (host_identifier)
-				.add_public_key (new_pair_record_key)
+				.add_raw_public_key (new_pair_record_pubkey)
 				.add_signature (signature)
 				.add_info (info)
 				.build ();
@@ -573,11 +575,12 @@ namespace Frida.Fruity.XPC {
 			Bytes encrypted_response = finish_response.read_member ("encrypted-data").get_data_value ();
 			Bytes raw_response = cipher.decrypt (new Bytes.static ("\x00\x00\x00\x00PS-Msg06".data[:12]), encrypted_response);
 			Variant response = PairingParamsParser.parse (raw_response.get_data ());
-			printerr ("Got response: %s\n", variant_to_pretty_string (response));
 
 			var config = new Plist ();
 			config.set_string ("identifier", host_identifier);
+			config.set_bytes ("publicKey", new_pair_record_pubkey);
 			config.set_bytes ("privateKey", get_raw_private_key (new_pair_record_key));
+			config.set_bytes ("irk", irk);
 			try {
 				config_file.get_parent ().make_directory_with_parents (cancellable);
 			} catch (GLib.Error e) {
