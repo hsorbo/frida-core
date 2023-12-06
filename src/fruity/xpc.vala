@@ -519,8 +519,27 @@ namespace Frida.Fruity.XPC {
 			message.append (get_raw_public_key (new_pair_record_key).get_data ());
 			Bytes signature = compute_message_signature (new Bytes.static (message.data), new_pair_record_key);
 
-			// TODO: Wire up opack serialization
-			Bytes info = new Bytes.take (Base64.decode ("50RuYW1lRmZlZG9yYUlhY2NvdW50SURhJDZCOTM3OEEyLUMxMkMtMzNDNC1BQjk5LTI1MUZENTJERjc4OFtyZW1vdGVwYWlyaW5nX3NlcmlhbF9udW1iZXJMQUFBQUFBQUFBQUFBRmFsdElSS4Dp6C3Aakl5a1ZvVAAZscd7RW1vZGVsTmNvbXB1dGVyLW1vZGVsQ21hY3YRIjNEVWZGYnRBZGRyUTExOjIyOjMzOjQ0OjU1OjY2"));
+			Bytes info = new OpackBuilder ()
+				.begin_dictionary ()
+					.set_member_name ("name")
+					.add_string_value (Environment.get_host_name ())
+					.set_member_name ("accountID")
+					.add_string_value (host_identifier)
+					.set_member_name ("remotepairing_serial_number")
+					.add_string_value ("AAAAAAAAAAAA")
+					.set_member_name ("altIRK")
+					.add_data_value (new Bytes ({
+						0xe9, 0xe8, 0x2d, 0xc0, 0x6a, 0x49, 0x79, 0x6b,
+						0x56, 0x6f, 0x54, 0x00, 0x19, 0xb1, 0xc7, 0x7b
+					}))
+					.set_member_name ("model")
+					.add_string_value ("computer-model")
+					.set_member_name ("mac")
+					.add_data_value (new Bytes ({ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 }))
+					.set_member_name ("btAddr")
+					.add_string_value ("11:22:33:44:55:66")
+				.end_dictionary ()
+				.build ();
 
 			Bytes inner_params = new PairingParamsBuilder ()
 				.add_identifier (host_identifier)
@@ -1331,6 +1350,138 @@ namespace Frida.Fruity.XPC {
 		RETRY_DELAY /* = 8 */,
 		SIGNATURE = 10,
 		INFO = 17,
+	}
+
+	public class OpackBuilder {
+		protected BufferBuilder builder = new BufferBuilder (LITTLE_ENDIAN);
+		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
+
+		public OpackBuilder () {
+			push_scope (new Scope (ROOT));
+		}
+
+		public unowned OpackBuilder begin_dictionary () {
+			begin_value ();
+
+			size_t type_offset = builder.offset;
+			builder.append_uint8 (0x00);
+
+			push_scope (new CollectionScope (type_offset));
+
+			return this;
+		}
+
+		public unowned OpackBuilder set_member_name (string name) {
+			return add_string_value (name);
+		}
+
+		public unowned OpackBuilder end_dictionary () {
+			CollectionScope scope = pop_scope ();
+
+			size_t n = scope.num_values / 2;
+			if (n < 0xf) {
+				builder.write_uint8 (scope.type_offset, 0xe0 | n);
+			} else {
+				builder
+					.write_uint8 (scope.type_offset, 0xef)
+					.append_uint8 (0x03);
+			}
+
+			return this;
+		}
+
+		public unowned OpackBuilder add_string_value (string val) {
+			begin_value ();
+
+			size_t len = val.length;
+
+			if (len > uint32.MAX) {
+				builder
+					.append_uint8 (0x6f)
+					.append_string (val, StringTerminator.NUL);
+
+				return this;
+			}
+
+			if (len <= 0x20)
+				builder.append_uint8 ((uint8) (0x40 + len));
+			else if (len <= uint8.MAX)
+				builder.append_uint8 (0x61).append_uint8 ((uint8) len);
+			else if (len <= uint16.MAX)
+				builder.append_uint8 (0x62).append_uint16 ((uint16) len);
+			else if (len <= 0xffffff)
+				builder.append_uint8 (0x63).append_uint8 ((uint8) (len & 0xff)).append_uint16 ((uint16) (len >> 8));
+			else
+				builder.append_uint8 (0x64).append_uint32 ((uint32) len);
+
+			builder.append_string (val, StringTerminator.NONE);
+
+			return this;
+		}
+
+		public unowned OpackBuilder add_data_value (Bytes val) {
+			begin_value ();
+
+			size_t size = val.get_size ();
+			if (size <= 0x20)
+				builder.append_uint8 ((uint8) (0x70 + size));
+			else if (size <= uint8.MAX)
+				builder.append_uint8 (0x91).append_uint8 ((uint8) size);
+			else if (size <= uint16.MAX)
+				builder.append_uint8 (0x92).append_uint16 ((uint16) size);
+			else if (size <= 0xffffff)
+				builder.append_uint8 (0x93).append_uint8 ((uint8) (size & 0xff)).append_uint16 ((uint16) (size >> 8));
+			else
+				builder.append_uint8 (0x94).append_uint32 ((uint32) size);
+
+			builder.append_bytes (val);
+
+			return this;
+		}
+
+		private unowned OpackBuilder begin_value () {
+			peek_scope ().num_values++;
+			return this;
+		}
+
+		public Bytes build () {
+			return builder.build ();
+		}
+
+		private void push_scope (Scope scope) {
+			scopes.offer_tail (scope);
+		}
+
+		private Scope peek_scope () {
+			return scopes.peek_tail ();
+		}
+
+		private T pop_scope<T> () {
+			return (T) scopes.poll_tail ();
+		}
+
+		private class Scope {
+			public Kind kind;
+			public size_t num_values = 0;
+
+			public enum Kind {
+				ROOT,
+				COLLECTION,
+			}
+
+			public Scope (Kind kind) {
+				this.kind = kind;
+			}
+		}
+
+		private class CollectionScope : Scope {
+			public size_t type_offset;
+
+			public CollectionScope (size_t type_offset) {
+				base (COLLECTION);
+				this.type_offset = type_offset;
+			}
+		}
 	}
 
 	public sealed class TunnelConnection : Object, AsyncInitable {
