@@ -206,7 +206,6 @@ namespace Frida.Fruity.XPC {
 
 				host_identifier = identifier;
 			} catch (GLib.Error e) {
-				printerr ("%s\n", e.message);
 				host_identifier = make_host_identifier ();
 			}
 			if (key == null) {
@@ -782,7 +781,36 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private static string make_host_identifier () {
-			return "6B9378A2-C12C-33C4-AB99-251FD52DF788"; // FIXME
+			var checksum = new Checksum (MD5);
+
+			const uint8 uuid_version = 3;
+			const uint8 dns_namespace[] = { 0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8 };
+			checksum.update (dns_namespace, dns_namespace.length);
+
+			unowned uint8[] host_name = Environment.get_host_name ().data;
+			checksum.update (host_name, host_name.length);
+
+			uint8 uuid[16];
+			size_t len = uuid.length;
+			checksum.get_digest (uuid, ref len);
+
+			uuid[6] = (uuid_version << 4) | (uuid[6] & 0xf);
+			uuid[8] = 0x80 | (uuid[8] & 0x3f);
+
+			var result = new StringBuilder.sized (36);
+			for (var i = 0; i != uuid.length; i++) {
+				result.append_printf ("%02X", uuid[i]);
+				switch (i) {
+					case 3:
+					case 5:
+					case 7:
+					case 9:
+						result.append_c ('-');
+						break;
+				}
+			}
+
+			return result.str;
 		}
 
 		private static Key make_keypair (KeyType type) {
