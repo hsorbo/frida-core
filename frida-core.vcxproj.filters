@@ -358,6 +358,9 @@
     <ClCompile Include="$(IntDir)src\barebone\arch-x86_64\machine.c">
       <Filter>Source Files\generated\barebone\arch-x86_64</Filter>
     </ClCompile>
+    <ClCompile Include="$(IntDir)src\fruity\xpc.c">
+      <Filter>Source Files\generated\fruity</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="src\droidy\injector.vala">
@@ -426,5 +429,8 @@
     <None Include="src\barebone\arch-x86_64\machine.vala">
       <Filter>Source Files\barebone\arch-x86_64</Filter>
     </None>
+    <None Include="src\fruity\xpc.vala">
+      <Filter>Source Files\fruity</Filter>
+    </None>
   </ItemGroup>
-</Project>
+</Project>
