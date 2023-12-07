@@ -16,11 +16,15 @@ namespace Frida.Fruity.XPC {
 	}
 
 	private async void test_indirect_xpc () {
-		var usbmux = yield UsbmuxClient.open (cancellable);
-		usbmux.device_attached (d => {
-			printerr ("Found id=%u udid=%s\n", d.id.raw_value, d.udid.raw_value);
-		});
-		usbmux.enable_listen_mode (cancellable);
+		try {
+			var usbmux = yield UsbmuxClient.open (cancellable);
+			usbmux.device_attached.connect (d => {
+				printerr ("Found id=%u udid=%s\n", d.id.raw_value, d.udid.raw_value);
+			});
+			yield usbmux.enable_listen_mode (cancellable);
+		} catch (GLib.Error e) {
+			printerr ("Oh noes: %s\n", e.message);
+		}
 	}
 
 	private async void test_direct_xpc () {
@@ -32,7 +36,7 @@ namespace Frida.Fruity.XPC {
 				printerr ("Found %u services\n", s.length);
 				if (services == null) {
 					services = s;
-					test_xpc.callback ();
+					test_direct_xpc.callback ();
 				}
 			});
 			yield;
