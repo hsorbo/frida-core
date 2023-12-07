@@ -17,11 +17,23 @@ namespace Frida.Fruity.XPC {
 
 	private async void test_indirect_xpc () {
 		try {
+			var device_id_request = new Promise<DeviceId?> ();
+
 			var usbmux = yield UsbmuxClient.open (cancellable);
 			usbmux.device_attached.connect (d => {
-				printerr ("Found id=%u udid=%s\n", d.id.raw_value, d.udid.raw_value);
+				if (!device_id_request.future.ready)
+					device_id_request.resolve (d.id);
 			});
 			yield usbmux.enable_listen_mode (cancellable);
+
+			DeviceId id = yield device_id_request.future.wait_async (cancellable);
+
+			yield usbmux.close (cancellable);
+
+			usbmux = yield UsbmuxClient.open (cancellable);
+			yield usbmux.connect_to_port (id, 49152, cancellable);
+
+			var tunnel_service = yield TunnelService.open (usbmux.connection, cancellable);
 		} catch (GLib.Error e) {
 			printerr ("Oh noes: %s\n", e.message);
 		}
