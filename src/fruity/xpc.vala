@@ -12,10 +12,15 @@ namespace Frida.Fruity.XPC {
 			return new DarwinPairingBrowser ();
 #elif LINUX
 			return new LinuxPairingBrowser ();
+#else
+			return new NullPairingBrowser ();
 #endif
 		}
 
 		public signal void services_discovered (PairingService[] services);
+	}
+
+	public class NullPairingBrowser : Object, PairingBrowser {
 	}
 
 	public interface PairingService : Object {
