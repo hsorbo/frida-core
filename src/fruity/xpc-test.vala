@@ -8,13 +8,22 @@ namespace Frida.Fruity.XPC {
 		Frida.init_with_runtime (GLIB);
 
 		var loop = new MainLoop (Frida.get_main_context ());
-		test_xpc.begin ();
+		test_indirect_xpc.begin ();
+		//test_direct_xpc.begin ();
 		loop.run ();
 
 		return 0;
 	}
 
-	private async void test_xpc () {
+	private async void test_indirect_xpc () {
+		var usbmux = yield UsbmuxClient.open (cancellable);
+		usbmux.device_attached (d => {
+			printerr ("Found id=%u udid=%s\n", d.id.raw_value, d.udid.raw_value);
+		});
+		usbmux.enable_listen_mode (cancellable);
+	}
+
+	private async void test_direct_xpc () {
 		try {
 			PairingService[]? services = null;
 
