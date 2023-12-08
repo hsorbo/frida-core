@@ -1284,6 +1284,8 @@ namespace Frida.Fruity {
 				.append_uint16 ((uint16) msg.get_size ())
 				.append_bytes (msg)
 				.build ();
+			printerr ("\n>>>\n");
+			hexdump (raw_msg.get_data ());
 			pending_output.append (raw_msg.get_data ());
 
 			if (!writing) {
@@ -1318,11 +1320,20 @@ namespace Frida.Fruity {
 					if (message_size < 2)
 						throw new Error.PROTOCOL ("Invalid message size");
 
+					size_t full_size = header_size + message_size;
+					if (input.get_available () < full_size)
+						yield fill_until_n_bytes_available (full_size);
+
+					var full_message = new uint8[full_size];
+					input.peek (full_message);
+					printerr ("\n<<<\n");
+					hexdump (full_message);
+
 					var raw_message = new uint8[message_size + 1];
 					input.peek (raw_message[:message_size], header_size);
 					printerr ("TODO: Handle message: %s\n", (string) raw_message);
 
-					input.skip (header_size + message_size, io_cancellable);
+					input.skip (full_size, io_cancellable);
 				}
 			} catch (GLib.Error e) {
 			}
