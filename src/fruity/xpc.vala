@@ -666,23 +666,18 @@ namespace Frida.Fruity {
 
 		private async void post_plain_with_sequence_number (uint64 seqno, Bytes payload, Cancellable? cancellable)
 				throws Error, IOError {
-			transport.post (transport.make_message_builder ()
+			transport.post (transport.make_object_builder ()
 				.begin_dictionary ()
-					.set_member_name ("mangledTypeName")
-					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
-					.set_member_name ("value")
+					.set_member_name ("sequenceNumber")
+					.add_uint64_value (seqno)
+					.set_member_name ("originatedBy")
+					.add_string_value ("host")
+					.set_member_name ("message")
 					.begin_dictionary ()
-						.set_member_name ("sequenceNumber")
-						.add_uint64_value (seqno)
-						.set_member_name ("originatedBy")
-						.add_string_value ("host")
-						.set_member_name ("message")
+						.set_member_name ("plain")
 						.begin_dictionary ()
-							.set_member_name ("plain")
-							.begin_dictionary ()
-								.set_member_name ("_0")
-								.add_raw_value (payload)
-							.end_dictionary ()
+							.set_member_name ("_0")
+							.add_raw_value (payload)
 						.end_dictionary ()
 					.end_dictionary ()
 				.end_dictionary ()
@@ -699,23 +694,18 @@ namespace Frida.Fruity {
 				.append_uint32 (0)
 				.build ();
 
-			Bytes raw_request = transport.make_message_builder ()
+			Bytes raw_request = transport.make_object_builder ()
 				.begin_dictionary ()
-					.set_member_name ("mangledTypeName")
-					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
-					.set_member_name ("value")
+					.set_member_name ("sequenceNumber")
+					.add_uint64_value (seqno)
+					.set_member_name ("originatedBy")
+					.add_string_value ("host")
+					.set_member_name ("message")
 					.begin_dictionary ()
-						.set_member_name ("sequenceNumber")
-						.add_uint64_value (seqno)
-						.set_member_name ("originatedBy")
-						.add_string_value ("host")
-						.set_member_name ("message")
+						.set_member_name ("streamEncrypted")
 						.begin_dictionary ()
-							.set_member_name ("streamEncrypted")
-							.begin_dictionary ()
-								.set_member_name ("_0")
-								.add_data_value (client_cipher.encrypt (iv, new Bytes.static (json.data)))
-							.end_dictionary ()
+							.set_member_name ("_0")
+							.add_data_value (client_cipher.encrypt (iv, new Bytes.static (json.data)))
 						.end_dictionary ()
 					.end_dictionary ()
 				.end_dictionary ()
@@ -1174,7 +1164,6 @@ namespace Frida.Fruity {
 		public abstract async void open (Cancellable? cancellable) throws Error, IOError;
 		public abstract void cancel ();
 
-		public abstract ObjectBuilder make_message_builder ();
 		public abstract ObjectBuilder make_object_builder ();
 		public abstract void post (Bytes message);
 	}
@@ -1211,16 +1200,21 @@ namespace Frida.Fruity {
 			connection.cancel ();
 		}
 
-		public ObjectBuilder make_message_builder () {
-			return new XpcBodyBuilder ();
-		}
-
 		public ObjectBuilder make_object_builder () {
 			return new XpcObjectBuilder ();
 		}
 
 		public void post (Bytes msg) {
-			connection.post.begin (msg, io_cancellable);
+			connection.post.begin (
+				new XpcBodyBuilder ()
+					.begin_dictionary ()
+						.set_member_name ("mangledTypeName")
+						.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
+						.set_member_name ("value")
+						.add_raw_value (msg)
+					.end_dictionary ()
+					.build (),
+				io_cancellable);
 		}
 
 		private void on_close (Error? error) {
@@ -1242,6 +1236,128 @@ namespace Frida.Fruity {
 
 				message (reader);
 			} catch (Error e) {
+			}
+		}
+	}
+
+	public class PlainPairingTransport : Object, PairingTransport {
+		public IOStream stream {
+			get;
+			construct;
+		}
+
+		private BufferedInputStream input;
+		private OutputStream output;
+
+		private ByteArray pending_output = new ByteArray ();
+		private bool writing = false;
+
+		private Cancellable io_cancellable = new Cancellable ();
+
+		public PlainPairingTransport (IOStream stream) {
+			Object (stream: stream);
+		}
+
+		construct {
+			input = (BufferedInputStream) Object.new (typeof (BufferedInputStream),
+				"base-stream", stream.get_input_stream (),
+				"close-base-stream", false,
+				"buffer-size", 128 * 1024);
+			output = stream.get_output_stream ();
+		}
+
+		public async void open (Cancellable? cancellable) throws Error, IOError {
+			process_incoming_messages.begin ();
+		}
+
+		public void cancel () {
+			io_cancellable.cancel ();
+		}
+
+		public ObjectBuilder make_object_builder () {
+			return new JsonObjectBuilder ();
+		}
+
+		public void post (Bytes msg) {
+			pending_output.append (msg.get_data ());
+
+			if (!writing) {
+				writing = true;
+
+				var source = new IdleSource ();
+				source.set_callback (() => {
+					process_pending_output.begin ();
+					return false;
+				});
+				source.attach (MainContext.get_thread_default ());
+			}
+		}
+
+		private async void process_incoming_messages () {
+			try {
+				while (true) {
+					size_t header_size = 11;
+					if (input.get_available () < header_size)
+						yield fill_until_n_bytes_available (header_size);
+
+					uint8 raw_magic[9];
+					input.peek (raw_magic);
+					string magic = ((string) raw_magic).make_valid (raw_magic.length);
+					if (magic != "RPPairing")
+						throw new Error.PROTOCOL ("Invalid message magic: '%s'", magic);
+
+					uint16 message_size = 0;
+					unowned uint8[] size_buf = ((uint8[]) &message_size)[:2];
+					input.peek (size_buf, raw_magic.length);
+					message_size = uint16.from_big_endian (message_size);
+					if (message_size < 2)
+						throw new Error.PROTOCOL ("Invalid message size");
+
+					var raw_message = new uint8[message_size + 1];
+					input.peek (raw_message, header_size);
+					// TODO: Parse and emit
+
+					input.skip (header_size + message_size, io_cancellable);
+				}
+			} catch (GLib.Error e) {
+			}
+
+			close (null);
+		}
+
+		private async void process_pending_output () {
+			while (pending_output.len > 0) {
+				uint8[] batch = pending_output.steal ();
+
+				size_t bytes_written;
+				try {
+					yield output.write_all_async (batch, Priority.DEFAULT, io_cancellable, out bytes_written);
+				} catch (GLib.Error e) {
+					break;
+				}
+			}
+
+			writing = false;
+		}
+
+		private async void fill_until_n_bytes_available (size_t minimum) throws Error, IOError {
+			size_t available = input.get_available ();
+			while (available < minimum) {
+				if (input.get_buffer_size () < minimum)
+					input.set_buffer_size (minimum);
+
+				ssize_t n;
+				try {
+					n = yield input.fill_async ((ssize_t) (input.get_buffer_size () - available), Priority.DEFAULT,
+						io_cancellable);
+				} catch (GLib.Error e) {
+					throw new Error.TRANSPORT ("Connection closed");
+				}
+
+				if (n == 0)
+					throw new Error.TRANSPORT ("Connection closed");
+
+				available += n;
 			}
 		}
 	}
@@ -3841,8 +3957,8 @@ namespace Frida.Fruity {
 			base ();
 
 			builder
-				.append_uint32 (SerializedObject.MAGIC)
-				.append_uint32 (SerializedObject.VERSION);
+				.append_uint32 (SerializedXpcObject.MAGIC)
+				.append_uint32 (SerializedXpcObject.VERSION);
 		}
 	}
 
@@ -4051,11 +4167,11 @@ namespace Frida.Fruity {
 			var buf = new Buffer (new Bytes.static (data), LITTLE_ENDIAN);
 
 			var magic = buf.read_uint32 (0);
-			if (magic != SerializedObject.MAGIC)
+			if (magic != SerializedXpcObject.MAGIC)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: bad magic (0x%08x)", magic);
 
 			var version = buf.read_uint8 (4);
-			if (version != SerializedObject.VERSION)
+			if (version != SerializedXpcObject.VERSION)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: unsupported version (%u)", version);
 
 			var parser = new XpcObjectParser (buf, 8);
@@ -4360,9 +4476,83 @@ namespace Frida.Fruity {
 		}
 	}
 
-	namespace SerializedObject {
+	namespace SerializedXpcObject {
 		public const uint32 MAGIC = 0x42133742;
 		public const uint32 VERSION = 5;
+	}
+
+	public class JsonObjectBuilder : Object, ObjectBuilder {
+		private Json.Builder builder = new Json.Builder ();
+
+		public unowned ObjectBuilder begin_dictionary () {
+			builder.begin_object ();
+			return this;
+		}
+
+		public unowned ObjectBuilder set_member_name (string name) {
+			builder.set_member_name (name);
+			return this;
+		}
+
+		public unowned ObjectBuilder end_dictionary () {
+			builder.end_object ();
+			return this;
+		}
+
+		public unowned ObjectBuilder begin_array () {
+			builder.begin_array ();
+			return this;
+		}
+
+		public unowned ObjectBuilder end_array () {
+			builder.end_array ();
+			return this;
+		}
+
+		public unowned ObjectBuilder add_null_value () {
+			builder.add_null_value ();
+			return this;
+		}
+
+		public unowned ObjectBuilder add_bool_value (bool val) {
+			builder.add_boolean_value (val);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_int64_value (int64 val) {
+			builder.add_int_value (val);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_uint64_value (uint64 val) {
+			builder.add_int_value ((int64) val);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_data_value (Bytes val) {
+			builder.add_string_value (Base64.encode (val.get_data ()));
+			return this;
+		}
+
+		public unowned ObjectBuilder add_string_value (string val) {
+			builder.add_string_value (val);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_uuid_value (string val) {
+			builder.add_string_value (val);
+			return this;
+		}
+
+		public unowned ObjectBuilder add_raw_value (Bytes val) {
+			assert_not_reached (); // FIXME
+			return this;
+		}
+
+		public Bytes build () {
+			string json = Json.to_string (builder.get_root (), false);
+			return new Bytes (json.data);
+		}
 	}
 
 	private Bytes get_raw_public_key (Key key) {
