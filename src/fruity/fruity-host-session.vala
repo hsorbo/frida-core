@@ -599,15 +599,16 @@ namespace Frida {
 			var opts = FrontmostQueryOptions._deserialize (options);
 			var scope = opts.scope;
 
-			var processes_request = new Promise<Gee.List<Fruity.ProcessInfo>> ();
+			var processes_request = new Promise<Gee.List<Fruity.DeviceInfoService.ProcessInfo>> ();
 			var apps_request = new Promise<Gee.List<Fruity.ApplicationDetails>> ();
 			fetch_processes.begin (processes_request, cancellable);
 			fetch_apps.begin (apps_request, cancellable);
 
-			Gee.List<Fruity.ProcessInfo> processes = yield processes_request.future.wait_async (cancellable);
-			Fruity.ProcessInfo? process = null;
+			Gee.List<Fruity.DeviceInfoService.ProcessInfo> processes =
+				yield processes_request.future.wait_async (cancellable);
+			Fruity.DeviceInfoService.ProcessInfo? process = null;
 			string? app_path = null;
-			foreach (Fruity.ProcessInfo candidate in processes) {
+			foreach (Fruity.DeviceInfoService.ProcessInfo candidate in processes) {
 				if (!candidate.foreground_running)
 					continue;
 
@@ -671,7 +672,7 @@ namespace Frida {
 			var scope = opts.scope;
 
 			var apps_request = new Promise<Gee.List<Fruity.ApplicationDetails>> ();
-			var processes_request = new Promise<Gee.List<Fruity.ProcessInfo>> ();
+			var processes_request = new Promise<Gee.List<Fruity.DeviceInfoService.ProcessInfo>> ();
 			fetch_apps.begin (apps_request, cancellable);
 			fetch_processes.begin (processes_request, cancellable);
 
@@ -694,9 +695,10 @@ namespace Frida {
 				}
 			}
 
-			Gee.List<Fruity.ProcessInfo> processes = yield processes_request.future.wait_async (cancellable);
-			var process_by_app_path = new Gee.HashMap<string, Fruity.ProcessInfo> ();
-			foreach (Fruity.ProcessInfo process in processes) {
+			Gee.List<Fruity.DeviceInfoService.ProcessInfo> processes =
+				yield processes_request.future.wait_async (cancellable);
+			var process_by_app_path = new Gee.HashMap<string, Fruity.DeviceInfoService.ProcessInfo> ();
+			foreach (Fruity.DeviceInfoService.ProcessInfo process in processes) {
 				bool is_main_process;
 				string app_path = compute_app_path_from_executable_path (process.real_app_name, out is_main_process);
 				if (is_main_process)
@@ -707,7 +709,7 @@ namespace Frida {
 
 			foreach (Fruity.ApplicationDetails app in apps) {
 				unowned string identifier = app.identifier;
-				Fruity.ProcessInfo? process = process_by_app_path[app.path];
+				Fruity.DeviceInfoService.ProcessInfo? process = process_by_app_path[app.path];
 
 				var info = HostApplicationInfo (identifier, app.name, (process != null) ? process.pid : 0,
 					make_parameters_dict ());
@@ -753,12 +755,13 @@ namespace Frida {
 			var opts = ProcessQueryOptions._deserialize (options);
 			var scope = opts.scope;
 
-			var processes_request = new Promise<Gee.List<Fruity.ProcessInfo>> ();
+			var processes_request = new Promise<Gee.List<Fruity.DeviceInfoService.ProcessInfo>> ();
 			var apps_request = new Promise<Gee.List<Fruity.ApplicationDetails>> ();
 			fetch_processes.begin (processes_request, cancellable);
 			fetch_apps.begin (apps_request, cancellable);
 
-			Gee.List<Fruity.ProcessInfo> processes = yield processes_request.future.wait_async (cancellable);
+			Gee.List<Fruity.DeviceInfoService.ProcessInfo> processes =
+				yield processes_request.future.wait_async (cancellable);
 			processes = maybe_filter_processes (processes, opts);
 
 			Gee.List<Fruity.ApplicationDetails> apps = yield apps_request.future.wait_async (cancellable);
@@ -770,7 +773,7 @@ namespace Frida {
 			var app_pids = new Gee.ArrayList<uint> ();
 			var app_by_main_pid = new Gee.HashMap<uint, Fruity.ApplicationDetails> ();
 			var app_by_related_pid = new Gee.HashMap<uint, Fruity.ApplicationDetails> ();
-			foreach (Fruity.ProcessInfo process in processes) {
+			foreach (Fruity.DeviceInfoService.ProcessInfo process in processes) {
 				unowned string executable_path = process.real_app_name;
 
 				bool is_main_process;
@@ -812,7 +815,7 @@ namespace Frida {
 
 			var result = new HostProcessInfo[0];
 
-			foreach (Fruity.ProcessInfo process in processes) {
+			foreach (Fruity.DeviceInfoService.ProcessInfo process in processes) {
 				uint pid = process.pid;
 				if (pid == 0)
 					continue;
@@ -876,7 +879,8 @@ namespace Frida {
 			}
 		}
 
-		private async void fetch_processes (Promise<Gee.List<Fruity.ProcessInfo>> promise, Cancellable? cancellable) {
+		private async void fetch_processes (Promise<Gee.List<Fruity.DeviceInfoService.ProcessInfo>> promise,
+				Cancellable? cancellable) {
 			try {
 				var device_info = yield Fruity.DeviceInfoService.open (channel_provider, cancellable);
 
@@ -909,18 +913,18 @@ namespace Frida {
 			return filtered_apps;
 		}
 
-		private Gee.List<Fruity.ProcessInfo> maybe_filter_processes (Gee.List<Fruity.ProcessInfo> processes,
-				ProcessQueryOptions options) {
+		private Gee.List<Fruity.DeviceInfoService.ProcessInfo> maybe_filter_processes (
+				Gee.List<Fruity.DeviceInfoService.ProcessInfo> processes, ProcessQueryOptions options) {
 			if (!options.has_selected_pids ())
 				return processes;
 
-			var process_by_pid = new Gee.HashMap<uint, Fruity.ProcessInfo> ();
-			foreach (Fruity.ProcessInfo process in processes)
+			var process_by_pid = new Gee.HashMap<uint, Fruity.DeviceInfoService.ProcessInfo> ();
+			foreach (Fruity.DeviceInfoService.ProcessInfo process in processes)
 				process_by_pid[process.pid] = process;
 
-			var filtered_processes = new Gee.ArrayList<Fruity.ProcessInfo> ();
+			var filtered_processes = new Gee.ArrayList<Fruity.DeviceInfoService.ProcessInfo> ();
 			options.enumerate_selected_pids (pid => {
-				Fruity.ProcessInfo? process = process_by_pid[pid];
+				Fruity.DeviceInfoService.ProcessInfo? process = process_by_pid[pid];
 				if (process != null)
 					filtered_processes.add (process);
 			});
@@ -967,7 +971,7 @@ namespace Frida {
 				parameters["debuggable"] = true;
 		}
 
-		private void add_app_state (HashTable<string, Variant> parameters, Fruity.ProcessInfo process) {
+		private void add_app_state (HashTable<string, Variant> parameters, Fruity.DeviceInfoService.ProcessInfo process) {
 			if (process.foreground_running)
 				parameters["frontmost"] = true;
 		}
@@ -983,7 +987,7 @@ namespace Frida {
 			parameters["icons"] = icons.end ();
 		}
 
-		private void add_process_metadata (HashTable<string, Variant> parameters, Fruity.ProcessInfo? process) {
+		private void add_process_metadata (HashTable<string, Variant> parameters, Fruity.DeviceInfoService.ProcessInfo? process) {
 			DateTime? started = process.start_date;
 			if (started != null)
 				parameters["started"] = started.format_iso8601 ();

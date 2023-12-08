@@ -1,5 +1,5 @@
 [CCode (gir_namespace = "FridaFruity", gir_version = "1.0")]
-namespace Frida.Fruity.XPC {
+namespace Frida.Fruity {
 	using OpenSSL;
 	using OpenSSL.Envelope;
 
@@ -17,13 +17,13 @@ namespace Frida.Fruity.XPC {
 #endif
 		}
 
-		public signal void services_discovered (PairingService[] services);
+		public signal void services_discovered (PairingServiceDetails[] services);
 	}
 
 	public class NullPairingBrowser : Object, PairingBrowser {
 	}
 
-	public interface PairingService : Object {
+	public interface PairingServiceDetails : Object {
 		public abstract string name {
 			get;
 		}
@@ -39,7 +39,7 @@ namespace Frida.Fruity.XPC {
 		public abstract async Gee.List<PairingServiceHost> resolve (Cancellable? cancellable = null) throws Error, IOError;
 
 		public string to_string () {
-			return @"PairingService { name: \"$name\", interface_index: $interface_index," +
+			return @"PairingServiceDetails { name: \"$name\", interface_index: $interface_index," +
 				@" interface_name: \"$interface_name\" }";
 		}
 	}
@@ -70,7 +70,7 @@ namespace Frida.Fruity.XPC {
 			construct;
 		}
 
-		private Connection connection;
+		private XpcConnection connection;
 
 		private Promise<Variant> handshake_promise = new Promise<Variant> ();
 		private Variant handshake_body;
@@ -92,7 +92,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			connection = new Connection (stream);
+			connection = new XpcConnection (stream);
 			connection.close.connect (on_close);
 			connection.message.connect (on_message);
 			connection.activate ();
@@ -107,7 +107,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public ServiceInfo get_service (string identifier) throws Error {
-			var reader = new ObjectReader (handshake_body);
+			var reader = new VariantReader (handshake_body);
 			reader
 				.read_member ("Services")
 				.read_member (identifier);
@@ -124,15 +124,15 @@ namespace Frida.Fruity.XPC {
 				handshake_promise.reject (
 					(error != null)
 						? error
-						: new Error.TRANSPORT ("Connection closed while waiting for Handshake message"));
+						: new Error.TRANSPORT ("XpcConnection closed while waiting for Handshake message"));
 			}
 		}
 
-		private void on_message (Message msg) {
+		private void on_message (XpcMessage msg) {
 			if (msg.body == null)
 				return;
 
-			var reader = new ObjectReader (msg.body);
+			var reader = new VariantReader (msg.body);
 			try {
 				reader.read_member ("MessageType");
 				unowned string message_type = reader.get_string_value ();
@@ -152,8 +152,8 @@ namespace Frida.Fruity.XPC {
 		public uint16 port;
 	}
 
-	public class TunnelService : Object, AsyncInitable {
-		public IOStream stream {
+	public class PairingService : Object, AsyncInitable {
+		public PairingTransport transport {
 			get;
 			construct;
 		}
@@ -162,8 +162,6 @@ namespace Frida.Fruity.XPC {
 			get;
 			private set;
 		}
-
-		private Connection connection;
 
 		private Gee.Map<uint64?, Promise<ObjectReader>> requests =
 			new Gee.HashMap<uint64?, Promise<ObjectReader>> (Numeric.uint64_hash, Numeric.uint64_equal);
@@ -176,8 +174,9 @@ namespace Frida.Fruity.XPC {
 		private ChaCha20Poly1305? client_cipher;
 		private ChaCha20Poly1305? server_cipher;
 
-		public static async TunnelService open (IOStream stream, Cancellable? cancellable = null) throws Error, IOError {
-			var service = new TunnelService (stream);
+		public static async PairingService open (PairingTransport transport, Cancellable? cancellable = null)
+				throws Error, IOError {
+			var service = new PairingService (transport);
 
 			try {
 				yield service.init_async (Priority.DEFAULT, cancellable);
@@ -188,11 +187,14 @@ namespace Frida.Fruity.XPC {
 			return service;
 		}
 
-		private TunnelService (IOStream stream) {
-			Object (stream: stream);
+		private PairingService (PairingTransport transport) {
+			Object (transport: transport);
 		}
 
 		construct {
+			transport.close.connect (on_close);
+			transport.message.connect (on_message);
+
 #if DARWIN
 			config_file = File.new_for_path ("/var/db/lockdown/RemotePairing/user_%u/selfIdentity.plist".printf (
 				(uint) Posix.getuid ()));
@@ -222,12 +224,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			connection = new Connection (stream);
-			connection.close.connect (on_close);
-			connection.message.connect (on_message);
-			connection.activate ();
-
-			yield connection.wait_until_ready (cancellable);
+			yield transport.open (cancellable);
 
 			yield attempt_pair_verify (cancellable);
 
@@ -242,7 +239,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public void close () {
-			connection.cancel ();
+			transport.cancel ();
 		}
 
 		public async TunnelConnection establish (string device_address, Cancellable? cancellable = null) throws Error, IOError {
@@ -302,7 +299,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async void attempt_pair_verify (Cancellable? cancellable) throws Error, IOError {
-			Bytes payload = new ObjectBuilder ()
+			Bytes payload = transport.make_object_builder ()
 				.begin_dictionary ()
 					.set_member_name ("request")
 					.begin_dictionary ()
@@ -372,7 +369,7 @@ namespace Frida.Fruity.XPC {
 				.add_public_key (host_keypair)
 				.build ();
 
-			Bytes start_payload = new ObjectBuilder ()
+			Bytes start_payload = transport.make_object_builder ()
 				.begin_dictionary ()
 					.set_member_name ("kind")
 					.add_string_value ("verifyManualPairing")
@@ -414,7 +411,7 @@ namespace Frida.Fruity.XPC {
 						inner_params))
 				.build ();
 
-			Bytes finish_payload = new ObjectBuilder ()
+			Bytes finish_payload = transport.make_object_builder ()
 				.begin_dictionary ()
 					.set_member_name ("kind")
 					.add_string_value ("verifyManualPairing")
@@ -427,7 +424,7 @@ namespace Frida.Fruity.XPC {
 
 			ObjectReader finish_response = yield request_pairing_data (finish_payload, cancellable);
 			if (finish_response.has_member ("error")) {
-				yield post_plain (new ObjectBuilder ()
+				yield post_plain (transport.make_object_builder ()
 					.begin_dictionary ()
 						.set_member_name ("event")
 						.begin_dictionary ()
@@ -452,7 +449,7 @@ namespace Frida.Fruity.XPC {
 				.add_state (1)
 				.build ();
 
-			Bytes start_payload = new ObjectBuilder ()
+			Bytes start_payload = transport.make_object_builder ()
 				.begin_dictionary ()
 					.set_member_name ("kind")
 					.add_string_value ("setupManualPairing")
@@ -487,7 +484,7 @@ namespace Frida.Fruity.XPC {
 				.add_proof (srp_session.key_proof)
 				.build ();
 
-			Bytes verify_payload = new ObjectBuilder ()
+			Bytes verify_payload = transport.make_object_builder ()
 				.begin_dictionary ()
 					.set_member_name ("kind")
 					.add_string_value ("setupManualPairing")
@@ -562,7 +559,7 @@ namespace Frida.Fruity.XPC {
 						inner_params))
 				.build ();
 
-			Bytes finish_payload = new ObjectBuilder ()
+			Bytes finish_payload = transport.make_object_builder ()
 				.begin_dictionary ()
 					.set_member_name ("kind")
 					.add_string_value ("setupManualPairing")
@@ -602,7 +599,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private async ObjectReader request_pairing_data (Bytes payload, Cancellable? cancellable) throws Error, IOError {
-			Bytes wrapper = new ObjectBuilder ()
+			Bytes wrapper = transport.make_object_builder ()
 				.begin_dictionary ()
 					.set_member_name ("event")
 					.begin_dictionary ()
@@ -640,7 +637,7 @@ namespace Frida.Fruity.XPC {
 				.read_member ("data")
 				.get_data_value ();
 			Variant data = PairingParamsParser.parse (raw_data.get_data ());
-			return new ObjectReader (data);
+			return new VariantReader (data);
 		}
 
 		private async ObjectReader request_plain (Bytes payload, Cancellable? cancellable) throws Error, IOError {
@@ -669,7 +666,7 @@ namespace Frida.Fruity.XPC {
 
 		private async void post_plain_with_sequence_number (uint64 seqno, Bytes payload, Cancellable? cancellable)
 				throws Error, IOError {
-			yield connection.post (new BodyBuilder ()
+			transport.post (transport.make_message_builder ()
 				.begin_dictionary ()
 					.set_member_name ("mangledTypeName")
 					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
@@ -702,7 +699,7 @@ namespace Frida.Fruity.XPC {
 				.append_uint32 (0)
 				.build ();
 
-			Bytes raw_request = new BodyBuilder ()
+			Bytes raw_request = transport.make_message_builder ()
 				.begin_dictionary ()
 					.set_member_name ("mangledTypeName")
 					.add_string_value ("RemotePairing.ControlChannelMessageEnvelope")
@@ -724,12 +721,7 @@ namespace Frida.Fruity.XPC {
 				.end_dictionary ()
 				.build ();
 
-			try {
-				yield connection.post (raw_request, cancellable);
-			} catch (GLib.Error e) {
-				if (requests.unset (seqno))
-					promise.reject (e);
-			}
+			transport.post (raw_request);
 
 			ObjectReader response = yield promise.future.wait_async (cancellable);
 
@@ -756,19 +748,8 @@ namespace Frida.Fruity.XPC {
 			requests.clear ();
 		}
 
-		private void on_message (Message msg) {
-			if (msg.body == null)
-				return;
-
-			var reader = new ObjectReader (msg.body);
+		private void on_message (ObjectReader reader) {
 			try {
-				string type_name = reader.read_member ("mangledTypeName").get_string_value ();
-				if (type_name != "RemotePairingDevice.ControlChannelMessageEnvelope")
-					return;
-				reader.end_member ();
-
-				reader.read_member ("value");
-
 				string origin = reader.read_member ("originatedBy").get_string_value ();
 				if (origin != "device")
 					return;
@@ -1182,6 +1163,85 @@ namespace Frida.Fruity.XPC {
 					checksum.get_digest (buf, ref len);
 					return new BigNumber.from_big_endian (buf);
 				}
+			}
+		}
+	}
+
+	public interface PairingTransport : Object {
+		public signal void close (Error? error);
+		public signal void message (ObjectReader reader);
+
+		public abstract async void open (Cancellable? cancellable) throws Error, IOError;
+		public abstract void cancel ();
+
+		public abstract ObjectBuilder make_message_builder ();
+		public abstract ObjectBuilder make_object_builder ();
+		public abstract void post (Bytes message);
+	}
+
+	public class XpcPairingTransport : Object, PairingTransport {
+		public IOStream stream {
+			get;
+			construct;
+		}
+
+		private XpcConnection connection;
+
+		private Cancellable io_cancellable = new Cancellable ();
+
+		public XpcPairingTransport (IOStream stream) {
+			Object (stream: stream);
+		}
+
+		construct {
+			connection = new XpcConnection (stream);
+			connection.close.connect (on_close);
+			connection.message.connect (on_message);
+		}
+
+		public async void open (Cancellable? cancellable) throws Error, IOError {
+			connection.activate ();
+
+			yield connection.wait_until_ready (cancellable);
+		}
+
+		public void cancel () {
+			io_cancellable.cancel ();
+
+			connection.cancel ();
+		}
+
+		public ObjectBuilder make_message_builder () {
+			return new XpcBodyBuilder ();
+		}
+
+		public ObjectBuilder make_object_builder () {
+			return new XpcObjectBuilder ();
+		}
+
+		public void post (Bytes msg) {
+			connection.post.begin (msg, io_cancellable);
+		}
+
+		private void on_close (Error? error) {
+			close (error);
+		}
+
+		private void on_message (XpcMessage msg) {
+			if (msg.body == null)
+				return;
+
+			var reader = new VariantReader (msg.body);
+			try {
+				string type_name = reader.read_member ("mangledTypeName").get_string_value ();
+				if (type_name != "RemotePairingDevice.ControlChannelMessageEnvelope")
+					return;
+				reader.end_member ();
+
+				reader.read_member ("value");
+
+				message (reader);
+			} catch (Error e) {
 			}
 		}
 	}
@@ -2707,7 +2767,7 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public async Gee.List<ApplicationInfo> enumerate_applications (Cancellable? cancellable = null) throws Error, IOError {
-			Bytes input = new ObjectBuilder ()
+			Bytes input = new XpcObjectBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("includeDefaultApps")
 					.add_bool_value (true)
@@ -2847,52 +2907,52 @@ namespace Frida.Fruity.XPC {
 
 			return processes;
 		}
-	}
 
-	public class ApplicationInfo {
-		public string bundle_identifier;
-		public string? bundle_version;
-		public string name;
-		public string? version;
-		public string path;
-		public bool is_first_party;
-		public bool is_developer_app;
-		public bool is_removable;
-		public bool is_internal;
-		public bool is_hidden;
-		public bool is_app_clip;
+		public class ApplicationInfo {
+			public string bundle_identifier;
+			public string? bundle_version;
+			public string name;
+			public string? version;
+			public string path;
+			public bool is_first_party;
+			public bool is_developer_app;
+			public bool is_removable;
+			public bool is_internal;
+			public bool is_hidden;
+			public bool is_app_clip;
 
-		public string to_string () {
-			var summary = new StringBuilder.sized (128);
+			public string to_string () {
+				var summary = new StringBuilder.sized (128);
 
-			summary
-				.append ("ApplicationInfo {")
-				.append (@"\n\tbundle_identifier: \"$bundle_identifier\",");
-			if (bundle_version != null)
-				summary.append (@"\n\tbundle_version: \"$bundle_version\",");
-			summary.append (@"\n\tname: \"$name\",");
-			if (version != null)
-				summary.append (@"\n\tversion: \"$version\",");
-			summary
-				.append (@"\n\tpath: \"$path\",")
-				.append (@"\n\tis_first_party: $is_first_party,")
-				.append (@"\n\tis_developer_app: $is_developer_app,")
-				.append (@"\n\tis_removable: $is_removable,")
-				.append (@"\n\tis_internal: $is_internal,")
-				.append (@"\n\tis_hidden: $is_hidden,")
-				.append (@"\n\tis_app_clip: $is_app_clip,")
-				.append ("\n}");
+				summary
+					.append ("ApplicationInfo {")
+					.append (@"\n\tbundle_identifier: \"$bundle_identifier\",");
+				if (bundle_version != null)
+					summary.append (@"\n\tbundle_version: \"$bundle_version\",");
+				summary.append (@"\n\tname: \"$name\",");
+				if (version != null)
+					summary.append (@"\n\tversion: \"$version\",");
+				summary
+					.append (@"\n\tpath: \"$path\",")
+					.append (@"\n\tis_first_party: $is_first_party,")
+					.append (@"\n\tis_developer_app: $is_developer_app,")
+					.append (@"\n\tis_removable: $is_removable,")
+					.append (@"\n\tis_internal: $is_internal,")
+					.append (@"\n\tis_hidden: $is_hidden,")
+					.append (@"\n\tis_app_clip: $is_app_clip,")
+					.append ("\n}");
 
-			return summary.str;
+				return summary.str;
+			}
 		}
-	}
 
-	public class ProcessInfo {
-		public uint pid;
-		public string path;
+		public class ProcessInfo {
+			public uint pid;
+			public string path;
 
-		public string to_string () {
-			return "ProcessInfo { pid: %u, path: \"%s\" }".printf (pid, path);
+			public string to_string () {
+				return "ProcessInfo { pid: %u, path: \"%s\" }".printf (pid, path);
+			}
 		}
 	}
 
@@ -2902,10 +2962,10 @@ namespace Frida.Fruity.XPC {
 			construct;
 		}
 
-		private Connection connection;
+		private XpcConnection connection;
 
 		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			connection = new Connection (stream);
+			connection = new XpcConnection (stream);
 			connection.activate ();
 
 			return true;
@@ -2915,9 +2975,9 @@ namespace Frida.Fruity.XPC {
 			connection.cancel ();
 		}
 
-		protected async ObjectReader invoke (string feature_identifier, Bytes? input = null, Cancellable? cancellable)
+		protected async VariantReader invoke (string feature_identifier, Bytes? input = null, Cancellable? cancellable)
 				throws Error, IOError {
-			var request = new BodyBuilder ()
+			var request = new XpcBodyBuilder ()
 				.begin_dictionary ()
 					.set_member_name ("CoreDevice.featureIdentifier")
 					.add_string_value (feature_identifier)
@@ -2955,17 +3015,17 @@ namespace Frida.Fruity.XPC {
 					.add_string_value ("C82A9C33-EFC9-4290-B53E-BA796C333BF3")
 				.end_dictionary ();
 
-			Message raw_response = yield connection.request (request.build (), cancellable);
+			XpcMessage raw_response = yield connection.request (request.build (), cancellable);
 
-			var response = new ObjectReader (raw_response.body);
+			var response = new VariantReader (raw_response.body);
 			response.read_member ("CoreDevice.output");
 			return response;
 		}
 	}
 
-	public sealed class Connection : Object {
+	public sealed class XpcConnection : Object {
 		public signal void close (Error? error);
-		public signal void message (Message msg);
+		public signal void message (XpcMessage msg);
 
 		public IOStream stream {
 			get;
@@ -2981,8 +3041,8 @@ namespace Frida.Fruity.XPC {
 		private Error? pending_error;
 
 		private Promise<bool> ready = new Promise<bool> ();
-		private Message? root_helo;
-		private Message? reply_helo;
+		private XpcMessage? root_helo;
+		private XpcMessage? reply_helo;
 		private Gee.Map<uint64?, PendingResponse> pending_responses =
 			new Gee.HashMap<uint64?, PendingResponse> (Numeric.uint64_hash, Numeric.uint64_equal);
 
@@ -3004,7 +3064,7 @@ namespace Frida.Fruity.XPC {
 			CLOSED,
 		}
 
-		public Connection (IOStream stream) {
+		public XpcConnection (IOStream stream) {
 			Object (stream: stream);
 		}
 
@@ -3013,27 +3073,27 @@ namespace Frida.Fruity.XPC {
 			NGHttp2.SessionCallbacks.make (out callbacks);
 
 			callbacks.set_send_callback ((session, data, flags, user_data) => {
-				Connection * self = user_data;
+				XpcConnection * self = user_data;
 				return self->on_send (data, flags);
 			});
 			callbacks.set_on_frame_send_callback ((session, frame, user_data) => {
-				Connection * self = user_data;
+				XpcConnection * self = user_data;
 				return self->on_frame_send (frame);
 			});
 			callbacks.set_on_frame_not_send_callback ((session, frame, lib_error_code, user_data) => {
-				Connection * self = user_data;
+				XpcConnection * self = user_data;
 				return self->on_frame_not_send (frame, lib_error_code);
 			});
 			callbacks.set_on_data_chunk_recv_callback ((session, flags, stream_id, data, user_data) => {
-				Connection * self = user_data;
+				XpcConnection * self = user_data;
 				return self->on_data_chunk_recv (flags, stream_id, data);
 			});
 			callbacks.set_on_frame_recv_callback ((session, frame, user_data) => {
-				Connection * self = user_data;
+				XpcConnection * self = user_data;
 				return self->on_frame_recv (frame);
 			});
 			callbacks.set_on_stream_close_callback ((session, stream_id, error_code, user_data) => {
-				Connection * self = user_data;
+				XpcConnection * self = user_data;
 				return self->on_stream_close (stream_id, error_code);
 			});
 
@@ -3066,8 +3126,8 @@ namespace Frida.Fruity.XPC {
 
 				root_stream = make_stream ();
 
-				Bytes header_request = new MessageBuilder (HEADER)
-					.add_body (new BodyBuilder ()
+				Bytes header_request = new XpcMessageBuilder (HEADER)
+					.add_body (new XpcBodyBuilder ()
 						.begin_dictionary ()
 						.end_dictionary ()
 						.build ()
@@ -3075,13 +3135,13 @@ namespace Frida.Fruity.XPC {
 					.build ();
 				yield root_stream.submit_data (header_request, io_cancellable);
 
-				Bytes ping_request = new MessageBuilder (PING)
+				Bytes ping_request = new XpcMessageBuilder (PING)
 					.build ();
 				yield root_stream.submit_data (ping_request, io_cancellable);
 
 				reply_stream = make_stream ();
 
-				Bytes open_reply_channel_request = new MessageBuilder (HEADER)
+				Bytes open_reply_channel_request = new XpcMessageBuilder (HEADER)
 					.add_flags (HEADER_OPENS_REPLY_CHANNEL)
 					.build ();
 				yield reply_stream.submit_data (open_reply_channel_request, io_cancellable);
@@ -3104,16 +3164,16 @@ namespace Frida.Fruity.XPC {
 			};
 		}
 
-		public async Message request (Bytes body, Cancellable? cancellable = null) throws Error, IOError {
+		public async XpcMessage request (Bytes body, Cancellable? cancellable = null) throws Error, IOError {
 			uint64 request_id = make_message_id ();
 
-			Bytes raw_request = new MessageBuilder (MSG)
+			Bytes raw_request = new XpcMessageBuilder (MSG)
 				.add_flags (WANTS_REPLY)
 				.add_id (request_id)
 				.add_body (body)
 				.build ();
 
-			// printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
+			// printerr ("\n>>> %s\n", XpcMessage.parse (raw_request.get_data ()).to_string ());
 
 			bool waiting = false;
 
@@ -3164,7 +3224,7 @@ namespace Frida.Fruity.XPC {
 				}
 			}
 
-			public Message? result {
+			public XpcMessage? result {
 				get;
 				private set;
 			}
@@ -3178,7 +3238,7 @@ namespace Frida.Fruity.XPC {
 				this.handler = (owned) handler;
 			}
 
-			public void complete_with_result (Message result) {
+			public void complete_with_result (XpcMessage result) {
 				if (completed)
 					return;
 				this.result = result;
@@ -3196,17 +3256,17 @@ namespace Frida.Fruity.XPC {
 		}
 
 		public async void post (Bytes body, Cancellable? cancellable = null) throws Error, IOError {
-			Bytes raw_request = new MessageBuilder (MSG)
+			Bytes raw_request = new XpcMessageBuilder (MSG)
 				.add_id (make_message_id ())
 				.add_body (body)
 				.build ();
 
-			// printerr ("\n>>> %s\n", Message.parse (raw_request.get_data ()).to_string ());
+			// printerr ("\n>>> %s\n", XpcMessage.parse (raw_request.get_data ()).to_string ());
 
 			yield root_stream.submit_data (raw_request, cancellable);
 		}
 
-		private void on_header (Message msg, Stream sender) {
+		private void on_header (XpcMessage msg, Stream sender) {
 			if (sender == root_stream) {
 				if (root_helo == null)
 					root_helo = msg;
@@ -3219,7 +3279,7 @@ namespace Frida.Fruity.XPC {
 				ready.resolve (true);
 		}
 
-		private void on_reply (Message msg, Stream sender) {
+		private void on_reply (XpcMessage msg, Stream sender) {
 			if (sender != reply_stream)
 				return;
 
@@ -3373,13 +3433,13 @@ namespace Frida.Fruity.XPC {
 		private class Stream {
 			public int32 id;
 
-			private weak Connection parent;
+			private weak XpcConnection parent;
 
 			private Gee.Deque<SubmitOperation> submissions = new Gee.ArrayQueue<SubmitOperation> ();
 			private SubmitOperation? current_submission = null;
 			private ByteArray incoming_message = new ByteArray ();
 
-			public Stream (Connection parent, int32 id) {
+			public Stream (XpcConnection parent, int32 id) {
 				this.parent = parent;
 				this.id = id;
 			}
@@ -3518,10 +3578,10 @@ namespace Frida.Fruity.XPC {
 			}
 
 			public int on_data_frame_recv_end (NGHttp2.Frame frame) {
-				Message? msg;
+				XpcMessage? msg;
 				size_t size;
 				try {
-					msg = Message.try_parse (incoming_message.data, out size);
+					msg = XpcMessage.try_parse (incoming_message.data, out size);
 				} catch (Error e) {
 					printerr ("Failed to parse message: %s\n", e.message);
 					return -1;
@@ -3555,35 +3615,74 @@ namespace Frida.Fruity.XPC {
 		public Variant? metadata;
 	}
 
-	public class MessageBuilder {
+	public interface ObjectBuilder : Object {
+		public abstract unowned ObjectBuilder begin_dictionary ();
+		public abstract unowned ObjectBuilder set_member_name (string name);
+		public abstract unowned ObjectBuilder end_dictionary ();
+
+		public abstract unowned ObjectBuilder begin_array ();
+		public abstract unowned ObjectBuilder end_array ();
+
+		public abstract unowned ObjectBuilder add_null_value ();
+		public abstract unowned ObjectBuilder add_bool_value (bool val);
+		public abstract unowned ObjectBuilder add_int64_value (int64 val);
+		public abstract unowned ObjectBuilder add_uint64_value (uint64 val);
+		public abstract unowned ObjectBuilder add_data_value (Bytes val);
+		public abstract unowned ObjectBuilder add_string_value (string val);
+		public abstract unowned ObjectBuilder add_uuid_value (string val);
+		public abstract unowned ObjectBuilder add_raw_value (Bytes val);
+
+		public abstract Bytes build ();
+	}
+
+	public interface ObjectReader : Object {
+		public abstract bool has_member (string name) throws Error;
+		public abstract unowned ObjectReader read_member (string name) throws Error;
+		public abstract unowned ObjectReader end_member ();
+
+		public abstract uint count_elements () throws Error;
+		public abstract unowned ObjectReader read_element (uint index) throws Error;
+		public abstract unowned ObjectReader end_element () throws Error;
+
+		public abstract bool get_bool_value () throws Error;
+		public abstract uint8 get_uint8_value () throws Error;
+		public abstract uint16 get_uint16_value () throws Error;
+		public abstract int64 get_int64_value () throws Error;
+		public abstract uint64 get_uint64_value () throws Error;
+		public abstract Bytes get_data_value () throws Error;
+		public abstract unowned string get_string_value () throws Error;
+		public abstract unowned string get_uuid_value () throws Error;
+	}
+
+	public class XpcMessageBuilder : Object {
 		private MessageType message_type;
 		private MessageFlags message_flags = NONE;
 		private uint64 message_id = 0;
 		private Bytes? body = null;
 
-		public MessageBuilder (MessageType message_type) {
+		public XpcMessageBuilder (MessageType message_type) {
 			this.message_type = message_type;
 		}
 
-		public unowned MessageBuilder add_flags (MessageFlags flags) {
+		public unowned XpcMessageBuilder add_flags (MessageFlags flags) {
 			message_flags = flags;
 			return this;
 		}
 
-		public unowned MessageBuilder add_id (uint64 id) {
+		public unowned XpcMessageBuilder add_id (uint64 id) {
 			message_id = id;
 			return this;
 		}
 
-		public unowned MessageBuilder add_body (Bytes b) {
+		public unowned XpcMessageBuilder add_body (Bytes b) {
 			body = b;
 			return this;
 		}
 
 		public Bytes build () {
 			var builder = new BufferBuilder (LITTLE_ENDIAN)
-				.append_uint32 (Message.MAGIC)
-				.append_uint8 (Message.PROTOCOL_VERSION)
+				.append_uint32 (XpcMessage.MAGIC)
+				.append_uint8 (XpcMessage.PROTOCOL_VERSION)
 				.append_uint8 (message_type)
 				.append_uint16 (message_flags)
 				.append_uint64 ((body != null) ? body.length : 0)
@@ -3596,7 +3695,7 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	public class Message {
+	public class XpcMessage {
 		public MessageType type;
 		public MessageFlags flags;
 		public uint64 id;
@@ -3607,15 +3706,15 @@ namespace Frida.Fruity.XPC {
 		public const size_t HEADER_SIZE = 24;
 		public const size_t MAX_SIZE = (128 * 1024 * 1024) - 1;
 
-		public static Message parse (uint8[] data) throws Error {
+		public static XpcMessage parse (uint8[] data) throws Error {
 			size_t size;
 			var msg = try_parse (data, out size);
 			if (msg == null)
-				throw new Error.INVALID_ARGUMENT ("Message is truncated");
+				throw new Error.INVALID_ARGUMENT ("XpcMessage is truncated");
 			return msg;
 		}
 
-		public static Message? try_parse (uint8[] data, out size_t size) throws Error {
+		public static XpcMessage? try_parse (uint8[] data, out size_t size) throws Error {
 			if (data.length < HEADER_SIZE) {
 				size = HEADER_SIZE;
 				return null;
@@ -3649,15 +3748,15 @@ namespace Frida.Fruity.XPC {
 				}
 				if (data.length - HEADER_SIZE < message_size)
 					return null;
-				body = ObjectParser.parse (data[HEADER_SIZE:HEADER_SIZE + message_size]);
+				body = XpcBodyParser.parse (data[HEADER_SIZE:HEADER_SIZE + message_size]);
 			}
 
 			uint64 message_id = buf.read_uint64 (16);
 
-			return new Message (message_type, message_flags, message_id, body);
+			return new XpcMessage (message_type, message_flags, message_id, body);
 		}
 
-		private Message (MessageType type, MessageFlags flags, uint64 id, Variant? body) {
+		private XpcMessage (MessageType type, MessageFlags flags, uint64 id, Variant? body) {
 			this.type = type;
 			this.flags = flags;
 			this.id = id;
@@ -3667,7 +3766,7 @@ namespace Frida.Fruity.XPC {
 		public string to_string () {
 			var description = new StringBuilder.sized (128);
 
-			description.append_printf (("Message {" +
+			description.append_printf (("XpcMessage {" +
 					"\n\ttype: %s," +
 					"\n\tflags: %s," +
 					"\n\tid: %" + int64.FORMAT_MODIFIER + "u,"),
@@ -3737,8 +3836,8 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	public class BodyBuilder : ObjectBuilder {
-		public BodyBuilder () {
+	public class XpcBodyBuilder : XpcObjectBuilder {
+		public XpcBodyBuilder () {
 			base ();
 
 			builder
@@ -3747,11 +3846,11 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	public class ObjectBuilder {
+	public class XpcObjectBuilder : Object, ObjectBuilder {
 		protected BufferBuilder builder = new BufferBuilder (LITTLE_ENDIAN);
 		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
 
-		public ObjectBuilder () {
+		public XpcObjectBuilder () {
 			push_scope (new Scope (ROOT));
 		}
 
@@ -3944,11 +4043,7 @@ namespace Frida.Fruity.XPC {
 		DICTIONARY	= 0xf000,
 	}
 
-	private class ObjectParser {
-		private Buffer buf;
-		private size_t cursor;
-		private EnumClass object_type_class;
-
+	private class XpcBodyParser {
 		public static Variant parse (uint8[] data) throws Error {
 			if (data.length < 12)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: truncated");
@@ -3963,11 +4058,17 @@ namespace Frida.Fruity.XPC {
 			if (version != SerializedObject.VERSION)
 				throw new Error.INVALID_ARGUMENT ("Invalid xpc_object: unsupported version (%u)", version);
 
-			var parser = new ObjectParser (buf, 8);
+			var parser = new XpcObjectParser (buf, 8);
 			return parser.read_object ();
 		}
+	}
 
-		private ObjectParser (Buffer buf, uint cursor) {
+	private class XpcObjectParser {
+		private Buffer buf;
+		private size_t cursor;
+		private EnumClass object_type_class;
+
+		public XpcObjectParser (Buffer buf, uint cursor) {
 			this.buf = buf;
 			this.cursor = cursor;
 			this.object_type_class = (EnumClass) typeof (ObjectType).class_ref ();
@@ -4117,7 +4218,7 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	public class ObjectReader {
+	public class VariantReader : Object, ObjectReader {
 		public Variant root_object {
 			get {
 				return scopes.peek_head ().val;
@@ -4132,7 +4233,7 @@ namespace Frida.Fruity.XPC {
 
 		private Gee.Deque<Scope> scopes = new Gee.ArrayQueue<Scope> ();
 
-		public ObjectReader (Variant v) {
+		public VariantReader (Variant v) {
 			push_scope (v);
 		}
 
