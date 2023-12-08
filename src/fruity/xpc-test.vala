@@ -8,9 +8,9 @@ namespace Frida.Fruity.XPC {
 		Frida.init_with_runtime (GLIB);
 
 		var loop = new MainLoop (Frida.get_main_context ());
-		//test_wifi_xpc.begin ();
+		test_wifi_xpc.begin ();
 		//test_indirect_xpc.begin ();
-		test_direct_xpc.begin ();
+		//test_direct_xpc.begin ();
 		loop.run ();
 
 		return 0;
@@ -20,7 +20,7 @@ namespace Frida.Fruity.XPC {
 		try {
 			var client = new SocketClient ();
 			var connection = yield client.connect_async (new InetSocketAddress.from_string ("192.168.1.124", 49152), cancellable);
-			var pairing_transport = new XpcPairingTransport (connection);
+			var pairing_transport = new PlainPairingTransport (connection);
 			var pairing_service = yield PairingService.open (pairing_transport, cancellable);
 		} catch (GLib.Error e) {
 			printerr ("Oh noes: %s\n", e.message);
