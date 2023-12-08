@@ -1279,7 +1279,12 @@ namespace Frida.Fruity {
 		}
 
 		public void post (Bytes msg) {
-			pending_output.append (msg.get_data ());
+			Bytes raw_msg = new BufferBuilder (BIG_ENDIAN)
+				.append_string ("RPPairing", StringTerminator.NONE)
+				.append_uint16 ((uint16) msg.get_size ())
+				.append_bytes (msg)
+				.build ();
+			pending_output.append (raw_msg.get_data ());
 
 			if (!writing) {
 				writing = true;
@@ -1314,8 +1319,8 @@ namespace Frida.Fruity {
 						throw new Error.PROTOCOL ("Invalid message size");
 
 					var raw_message = new uint8[message_size + 1];
-					input.peek (raw_message, header_size);
-					// TODO: Parse and emit
+					input.peek (raw_message[:message_size], header_size);
+					printerr ("TODO: Handle message: %s\n", (string) raw_message);
 
 					input.skip (header_size + message_size, io_cancellable);
 				}
@@ -4483,6 +4488,7 @@ namespace Frida.Fruity {
 
 	public class JsonObjectBuilder : Object, ObjectBuilder {
 		private Json.Builder builder = new Json.Builder ();
+		private Gee.Map<string, Bytes> raw_values = new Gee.HashMap<string, Bytes> ();
 
 		public unowned ObjectBuilder begin_dictionary () {
 			builder.begin_object ();
@@ -4545,12 +4551,25 @@ namespace Frida.Fruity {
 		}
 
 		public unowned ObjectBuilder add_raw_value (Bytes val) {
-			assert_not_reached (); // FIXME
+			string uuid = Uuid.string_random ();
+			builder.add_string_value (uuid);
+			raw_values[uuid] = val;
 			return this;
 		}
 
 		public Bytes build () {
 			string json = Json.to_string (builder.get_root (), false);
+
+			foreach (var e in raw_values.entries) {
+				unowned string uuid = e.key;
+				Bytes val = e.value;
+
+				unowned string raw_str = (string) val.get_data ();
+				string str = raw_str[:(long) val.get_size ()];
+
+				json = json.replace ("\"" + uuid + "\"", str);
+			}
+
 			return new Bytes (json.data);
 		}
 	}
