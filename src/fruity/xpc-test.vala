@@ -8,11 +8,22 @@ namespace Frida.Fruity.XPC {
 		Frida.init_with_runtime (GLIB);
 
 		var loop = new MainLoop (Frida.get_main_context ());
-		test_indirect_xpc.begin ();
+		test_wifi_xpc.begin ();
+		//test_indirect_xpc.begin ();
 		//test_direct_xpc.begin ();
 		loop.run ();
 
 		return 0;
+	}
+
+	private async void test_wifi_xpc () {
+		try {
+			var client = new SocketClient ();
+			var connection = yield client.connect_async (new InetSocketAddress.from_string ("192.168.1.124", 49152), cancellable);
+			var tunnel_service = yield TunnelService.open (connection, cancellable);
+		} catch (GLib.Error e) {
+			printerr ("Oh noes: %s\n", e.message);
+		}
 	}
 
 	private async void test_indirect_xpc () {
