@@ -8,9 +8,9 @@ namespace Frida.Fruity.XPC {
 		Frida.init_with_runtime (GLIB);
 
 		var loop = new MainLoop (Frida.get_main_context ());
-		test_wifi_xpc.begin ();
+		//test_wifi_xpc.begin ();
 		//test_indirect_xpc.begin ();
-		//test_direct_xpc.begin ();
+		test_direct_xpc.begin ();
 		loop.run ();
 
 		return 0;
@@ -20,7 +20,8 @@ namespace Frida.Fruity.XPC {
 		try {
 			var client = new SocketClient ();
 			var connection = yield client.connect_async (new InetSocketAddress.from_string ("192.168.1.124", 49152), cancellable);
-			var tunnel_service = yield TunnelService.open (connection, cancellable);
+			var pairing_transport = new XpcPairingTransport (connection);
+			var pairing_service = yield PairingService.open (pairing_transport, cancellable);
 		} catch (GLib.Error e) {
 			printerr ("Oh noes: %s\n", e.message);
 		}
@@ -44,7 +45,8 @@ namespace Frida.Fruity.XPC {
 			usbmux = yield UsbmuxClient.open (cancellable);
 			yield usbmux.connect_to_port (id, 49152, cancellable);
 
-			var tunnel_service = yield TunnelService.open (usbmux.connection, cancellable);
+			var pairing_transport = new XpcPairingTransport (usbmux.connection);
+			var pairing_service = yield PairingService.open (pairing_transport, cancellable);
 		} catch (GLib.Error e) {
 			printerr ("Oh noes: %s\n", e.message);
 		}
@@ -52,7 +54,7 @@ namespace Frida.Fruity.XPC {
 
 	private async void test_direct_xpc () {
 		try {
-			PairingService[]? services = null;
+			PairingServiceDetails[]? services = null;
 
 			var browser = PairingBrowser.make_default ();
 			browser.services_discovered.connect (s => {
@@ -73,11 +75,12 @@ namespace Frida.Fruity.XPC {
 
 			Device device = yield pick_device (services, cancellable);
 
-			var tunnel_service = yield TunnelService.open (
-				yield device.open_service ("com.apple.internal.dt.coredevice.untrusted.tunnelservice", cancellable),
-				cancellable);
+			var pairing_transport = new XpcPairingTransport (
+				yield device.open_service ("com.apple.internal.dt.coredevice.untrusted.tunnelservice", cancellable));
 
-			TunnelConnection tunnel = yield tunnel_service.establish (device.address, cancellable);
+			var pairing_service = yield PairingService.open (pairing_transport, cancellable);
+
+			TunnelConnection tunnel = yield pairing_service.establish (device.address, cancellable);
 
 			var disco = yield DiscoveryService.open (
 				yield tunnel.open_connection (tunnel.remote_rsd_port, cancellable),
@@ -88,12 +91,12 @@ namespace Frida.Fruity.XPC {
 				cancellable);
 
 			printerr ("=== Applications\n");
-			foreach (ApplicationInfo app in yield app_service.enumerate_applications ()) {
+			foreach (AppService.ApplicationInfo app in yield app_service.enumerate_applications ()) {
 				printerr ("%s\n", app.to_string ());
 			}
 
 			printerr ("\n=== Processes\n");
-			foreach (ProcessInfo p in yield app_service.enumerate_processes ()) {
+			foreach (AppService.ProcessInfo p in yield app_service.enumerate_processes ()) {
 				printerr ("%s\n", p.to_string ());
 			}
 
@@ -106,10 +109,10 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	private async Device pick_device (PairingService[] services, Cancellable? cancellable) throws Error, IOError {
-		foreach (PairingService service in services) {
+	private async Device pick_device (PairingServiceDetails[] services, Cancellable? cancellable) throws Error, IOError {
+		foreach (PairingServiceDetails service in services) {
 			foreach (PairingServiceHost host in yield service.resolve (cancellable)) {
-				if (!host.name.has_prefix ("iPad")) {
+				if (!("iPad" in host.name)) {
 					printerr ("Skipping: %s\n", host.to_string ());
 					continue;
 				}
@@ -178,7 +181,7 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	private async void dump_service (PairingService service) {
+	private async void dump_service (PairingServiceDetails service) {
 		try {
 			var hosts = yield service.resolve (cancellable);
 			uint i = 0;

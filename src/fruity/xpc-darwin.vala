@@ -1,5 +1,5 @@
 [CCode (gir_namespace = "FridaFruity", gir_version = "1.0")]
-namespace Frida.Fruity.XPC {
+namespace Frida.Fruity {
 	using Darwin.DNSSD;
 	using Darwin.GCD;
 	using Darwin.Net;
@@ -12,7 +12,7 @@ namespace Frida.Fruity.XPC {
 		private DNSService browse_session;
 		private TaskQueue task_queue;
 
-		private Gee.List<PairingService> current_batch = new Gee.ArrayList<PairingService> ();
+		private Gee.List<PairingServiceDetails> current_batch = new Gee.ArrayList<PairingServiceDetails> ();
 
 		construct {
 			main_context = MainContext.ref_thread_default ();
@@ -45,14 +45,14 @@ namespace Frida.Fruity.XPC {
 			var interface_name_buf = new char[IFNAMSIZ];
 			unowned string interface_name = if_indextoname (interface_index, interface_name_buf);
 
-			var service = new DarwinPairingService (service_name, interface_index, interface_name, task_queue);
+			var service = new DarwinPairingServiceDetails (service_name, interface_index, interface_name, task_queue);
 			current_batch.add (service);
 
 			if ((flags & DNSService.Flags.MoreComing) != 0)
 				return;
 
 			var services = current_batch;
-			current_batch = new Gee.ArrayList<PairingService> ();
+			current_batch = new Gee.ArrayList<PairingServiceDetails> ();
 
 			schedule_on_frida_thread (() => {
 				services_discovered (services.to_array ());
@@ -145,7 +145,7 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	public class DarwinPairingService : Object, PairingService {
+	public class DarwinPairingServiceDetails : Object, PairingServiceDetails {
 		public string name {
 			get { return _name; }
 		}
@@ -164,7 +164,7 @@ namespace Frida.Fruity.XPC {
 
 		private DNSServiceProvider dns;
 
-		internal DarwinPairingService (string name, uint interface_index, string interface_name, DNSServiceProvider dns) {
+		internal DarwinPairingServiceDetails (string name, uint interface_index, string interface_name, DNSServiceProvider dns) {
 			_name = name;
 			_interface_index = interface_index;
 			_interface_name = interface_name;
@@ -178,11 +178,11 @@ namespace Frida.Fruity.XPC {
 		}
 
 		private class ResolveTask : DNSServiceTask {
-			private weak DarwinPairingService parent;
+			private weak DarwinPairingServiceDetails parent;
 
 			private Gee.List<PairingServiceHost> hosts = new Gee.ArrayList<PairingServiceHost> ();
 
-			public ResolveTask (DarwinPairingService parent) {
+			public ResolveTask (DarwinPairingServiceDetails parent) {
 				this.parent = parent;
 			}
 
@@ -194,7 +194,7 @@ namespace Frida.Fruity.XPC {
 
 			private void on_resolve_reply (DNSService sd_ref, DNSService.Flags flags, uint32 interface_index,
 					DNSService.ErrorType error_code, string fullname, string hosttarget, uint16 port,
-					uint8[] txt_record) {
+					uint8[] raw_txt_record) {
 				if (error_code != NoError) {
 					complete (null,
 						new Error.TRANSPORT ("Unable to resolve service '%s' on interface %s",
@@ -202,8 +202,26 @@ namespace Frida.Fruity.XPC {
 					return;
 				}
 
-				hosts.add (new DarwinPairingServiceHost (parent, hosttarget, uint16.from_big_endian (port),
-					new Bytes (txt_record), parent.dns));
+				var txt_record = new Gee.ArrayList<string> ();
+				size_t cursor = 0;
+				size_t remaining = raw_txt_record.length;
+				while (remaining != 0) {
+					size_t len = raw_txt_record[cursor];
+					cursor++;
+					remaining--;
+					if (len > remaining)
+						break;
+
+					unowned string raw_val = (string) raw_txt_record[cursor:cursor + len];
+					string val = raw_val.make_valid ((ssize_t) len);
+					txt_record.add (val);
+
+					cursor += len;
+					remaining -= len;
+				}
+
+				hosts.add (new DarwinPairingServiceHost (parent, hosttarget, uint16.from_big_endian (port), txt_record,
+					parent.dns));
 
 				if ((flags & DNSService.Flags.MoreComing) == 0)
 					complete (hosts, null);
@@ -220,18 +238,18 @@ namespace Frida.Fruity.XPC {
 			get { return _port; }
 		}
 
-		public Bytes txt_record {
+		public Gee.List<string> txt_record {
 			get { return _txt_record; }
 		}
 
 		private string _name;
 		private uint16 _port;
-		private Bytes _txt_record;
+		private Gee.List<string> _txt_record;
 
-		private PairingService service;
+		private PairingServiceDetails service;
 		private DNSServiceProvider dns;
 
-		internal DarwinPairingServiceHost (PairingService service, string name, uint16 port, Bytes txt_record,
+		internal DarwinPairingServiceHost (PairingServiceDetails service, string name, uint16 port, Gee.List<string> txt_record,
 				DNSServiceProvider dns) {
 			_name = name;
 			_port = port;

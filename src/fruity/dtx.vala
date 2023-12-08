@@ -74,6 +74,38 @@ namespace Frida.Fruity {
 				return "/private" + name;
 			return name;
 		}
+
+		public class ProcessInfo : Object {
+			public uint pid {
+				get;
+				set;
+			}
+
+			public string name {
+				get;
+				set;
+			}
+
+			public string real_app_name {
+				get;
+				set;
+			}
+
+			public bool is_application {
+				get;
+				set;
+			}
+
+			public bool foreground_running {
+				get;
+				set;
+			}
+
+			public DateTime? start_date {
+				get;
+				set;
+			}
+		}
 	}
 
 	public class ApplicationListingService : Object, AsyncInitable {
@@ -178,6 +210,100 @@ namespace Frida.Fruity {
 
 			return result;
 		}
+
+		public class ApplicationInfo : Object {
+			public ApplicationType app_type {
+				get;
+				set;
+			}
+
+			public string display_name {
+				get;
+				set;
+			}
+
+			public string bundle_identifier {
+				get;
+				set;
+			}
+
+			public string bundle_path {
+				get;
+				set;
+			}
+
+			public string? version {
+				get;
+				set;
+			}
+
+			public bool placeholder {
+				get;
+				set;
+			}
+
+			public bool restricted {
+				get;
+				set;
+			}
+
+			public string? executable_name {
+				get;
+				set;
+			}
+
+			public string[]? app_extension_uuids {
+				get;
+				set;
+			}
+
+			public string? plugin_uuid {
+				get;
+				set;
+			}
+
+			public string? plugin_identifier {
+				get;
+				set;
+			}
+
+			public string? container_bundle_identifier {
+				get;
+				set;
+			}
+
+			public string? container_bundle_path {
+				get;
+				set;
+			}
+		}
+
+		public enum ApplicationType {
+			SYSTEM = 1,
+			USER,
+			PLUGIN_KIT;
+
+			public static ApplicationType from_nick (string nick) throws Error {
+				return Marshal.enum_from_nick<ApplicationType> (nick);
+			}
+
+			public string to_nick () {
+				return Marshal.enum_to_nick<ApplicationType> (this);
+			}
+
+			internal static ApplicationType from_dtx (string type) {
+				if (type == "System")
+					return SYSTEM;
+
+				if (type == "User")
+					return USER;
+
+				if (type == "PluginKit")
+					return PLUGIN_KIT;
+
+				assert_not_reached ();
+			}
+		}
 	}
 
 	public class ProcessControlService : Object, AsyncInitable {
@@ -217,132 +343,6 @@ namespace Frida.Fruity {
 			var args = new DTXArgumentListBuilder ()
 				.append_object (new NSNumber.from_integer (pid));
 			yield channel.invoke ("killPid:", args, cancellable);
-		}
-	}
-
-	public class ProcessInfo : Object {
-		public uint pid {
-			get;
-			set;
-		}
-
-		public string name {
-			get;
-			set;
-		}
-
-		public string real_app_name {
-			get;
-			set;
-		}
-
-		public bool is_application {
-			get;
-			set;
-		}
-
-		public bool foreground_running {
-			get;
-			set;
-		}
-
-		public DateTime? start_date {
-			get;
-			set;
-		}
-	}
-
-	public class ApplicationInfo : Object {
-		public ApplicationType app_type {
-			get;
-			set;
-		}
-
-		public string display_name {
-			get;
-			set;
-		}
-
-		public string bundle_identifier {
-			get;
-			set;
-		}
-
-		public string bundle_path {
-			get;
-			set;
-		}
-
-		public string? version {
-			get;
-			set;
-		}
-
-		public bool placeholder {
-			get;
-			set;
-		}
-
-		public bool restricted {
-			get;
-			set;
-		}
-
-		public string? executable_name {
-			get;
-			set;
-		}
-
-		public string[]? app_extension_uuids {
-			get;
-			set;
-		}
-
-		public string? plugin_uuid {
-			get;
-			set;
-		}
-
-		public string? plugin_identifier {
-			get;
-			set;
-		}
-
-		public string? container_bundle_identifier {
-			get;
-			set;
-		}
-
-		public string? container_bundle_path {
-			get;
-			set;
-		}
-	}
-
-	public enum ApplicationType {
-		SYSTEM = 1,
-		USER,
-		PLUGIN_KIT;
-
-		public static ApplicationType from_nick (string nick) throws Error {
-			return Marshal.enum_from_nick<ApplicationType> (nick);
-		}
-
-		public string to_nick () {
-			return Marshal.enum_to_nick<ApplicationType> (this);
-		}
-
-		internal static ApplicationType from_dtx (string type) {
-			if (type == "System")
-				return SYSTEM;
-
-			if (type == "User")
-				return USER;
-
-			if (type == "PluginKit")
-				return PLUGIN_KIT;
-
-			assert_not_reached ();
 		}
 	}
 
