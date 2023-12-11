@@ -158,7 +158,12 @@ namespace Frida.Fruity {
 			construct;
 		}
 
-		public DeviceInfo device_info {
+		public DeviceOptions device_options {
+			get;
+			private set;
+		}
+
+		public DeviceInfo? device_info {
 			get;
 			private set;
 		}
@@ -229,8 +234,11 @@ namespace Frida.Fruity {
 			yield attempt_pair_verify (cancellable);
 
 			Bytes? shared_key = yield verify_manual_pairing (cancellable);
-			if (shared_key == null)
+			if (shared_key == null) {
+				if (!device_options.allows_pair_setup)
+					throw new Error.NOT_SUPPORTED ("Device not paired and pairing not allowed on current transport");
 				shared_key = yield setup_manual_pairing (cancellable);
+			}
 
 			client_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ClientEncrypt-main"));
 			server_cipher = new ChaCha20Poly1305 (derive_chacha_key (shared_key, "ServerEncrypt-main"));
@@ -329,36 +337,66 @@ namespace Frida.Fruity {
 				.read_member ("response")
 				.read_member ("_1")
 				.read_member ("handshake")
-				.read_member ("_0")
-				.read_member ("peerDeviceInfo");
+				.read_member ("_0");
 
-			string name = response.read_member ("name").get_string_value ();
+			response.read_member ("deviceOptions");
+
+			bool allows_pair_setup = response.read_member ("allowsPairSetup").get_bool_value ();
 			response.end_member ();
 
-			string model = response.read_member ("model").get_string_value ();
+			bool allows_pinless_pairing = response.read_member ("allowsPinlessPairing").get_bool_value ();
 			response.end_member ();
 
-			string udid = response.read_member ("udid").get_string_value ();
+			bool allows_promptless_automation_pairing_upgrade =
+				response.read_member ("allowsPromptlessAutomationPairingUpgrade").get_bool_value ();
 			response.end_member ();
 
-			uint64 ecid = response.read_member ("ecid").get_uint64_value ();
+			bool allows_sharing_sensitive_info = response.read_member ("allowsSharingSensitiveInfo").get_bool_value ();
 			response.end_member ();
 
-			Plist kvs;
-			try {
-				kvs = new Plist.from_binary (response.read_member ("deviceKVSData").get_data_value ().get_data ());
-				response.end_member ();
-			} catch (PlistError e) {
-				throw new Error.PROTOCOL ("%s", e.message);
-			}
+			bool allows_incoming_tunnel_connections =
+				response.read_member ("allowsIncomingTunnelConnections").get_bool_value ();
+			response.end_member ();
 
-			device_info = new DeviceInfo () {
-				name = name,
-				model = model,
-				udid = udid,
-				ecid = ecid,
-				kvs = kvs,
+			device_options = new DeviceOptions () {
+				allows_pair_setup = allows_pair_setup,
+				allows_pinless_pairing = allows_pinless_pairing,
+				allows_promptless_automation_pairing_upgrade = allows_promptless_automation_pairing_upgrade,
+				allows_sharing_sensitive_info = allows_sharing_sensitive_info,
+				allows_incoming_tunnel_connections = allows_incoming_tunnel_connections,
 			};
+
+			if (response.has_member ("peerDeviceInfo")) {
+				response.read_member ("peerDeviceInfo");
+
+				string name = response.read_member ("name").get_string_value ();
+				response.end_member ();
+
+				string model = response.read_member ("model").get_string_value ();
+				response.end_member ();
+
+				string udid = response.read_member ("udid").get_string_value ();
+				response.end_member ();
+
+				uint64 ecid = response.read_member ("ecid").get_uint64_value ();
+				response.end_member ();
+
+				Plist kvs;
+				try {
+					kvs = new Plist.from_binary (response.read_member ("deviceKVSData").get_data_value ().get_data ());
+					response.end_member ();
+				} catch (PlistError e) {
+					throw new Error.PROTOCOL ("%s", e.message);
+				}
+
+				device_info = new DeviceInfo () {
+					name = name,
+					model = model,
+					udid = udid,
+					ecid = ecid,
+					kvs = kvs,
+				};
+			}
 		}
 
 		private async Bytes? verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
@@ -1234,6 +1272,8 @@ namespace Frida.Fruity {
 
 				reader.read_member ("value");
 
+				printerr ("<<< %s\n", variant_to_pretty_string (reader.current_object));
+
 				message (reader);
 			} catch (Error e) {
 			}
@@ -1284,8 +1324,6 @@ namespace Frida.Fruity {
 				.append_uint16 ((uint16) msg.get_size ())
 				.append_bytes (msg)
 				.build ();
-			printerr ("\n>>>\n");
-			hexdump (raw_msg.get_data ());
 			pending_output.append (raw_msg.get_data ());
 
 			if (!writing) {
@@ -1313,25 +1351,27 @@ namespace Frida.Fruity {
 					if (magic != "RPPairing")
 						throw new Error.PROTOCOL ("Invalid message magic: '%s'", magic);
 
-					uint16 message_size = 0;
-					unowned uint8[] size_buf = ((uint8[]) &message_size)[:2];
+					uint16 body_size = 0;
+					unowned uint8[] size_buf = ((uint8[]) &body_size)[:2];
 					input.peek (size_buf, raw_magic.length);
-					message_size = uint16.from_big_endian (message_size);
-					if (message_size < 2)
+					body_size = uint16.from_big_endian (body_size);
+					if (body_size < 2)
 						throw new Error.PROTOCOL ("Invalid message size");
 
-					size_t full_size = header_size + message_size;
+					size_t full_size = header_size + body_size;
 					if (input.get_available () < full_size)
 						yield fill_until_n_bytes_available (full_size);
 
-					var full_message = new uint8[full_size];
-					input.peek (full_message);
-					printerr ("\n<<<\n");
-					hexdump (full_message);
+					var raw_json = new uint8[body_size + 1];
+					input.peek (raw_json[:body_size], header_size);
 
-					var raw_message = new uint8[message_size + 1];
-					input.peek (raw_message[:message_size], header_size);
-					printerr ("TODO: Handle message: %s\n", (string) raw_message);
+					unowned string json = (string) raw_json;
+					if (!json.validate ())
+						throw new Error.PROTOCOL ("Invalid UTF-8");
+
+					var reader = new JsonObjectReader (json);
+
+					message (reader);
 
 					input.skip (full_size, io_cancellable);
 				}
@@ -1375,6 +1415,24 @@ namespace Frida.Fruity {
 
 				available += n;
 			}
+		}
+	}
+
+	public class DeviceOptions {
+		public bool allows_pair_setup;
+		public bool allows_pinless_pairing;
+		public bool allows_promptless_automation_pairing_upgrade;
+		public bool allows_sharing_sensitive_info;
+		public bool allows_incoming_tunnel_connections;
+
+		public string to_string () {
+			return "DeviceOptions { " +
+				@"allows_pair_setup: $allows_pair_setup, " +
+				@"allows_pinless_pairing: $allows_pinless_pairing " +
+				@"allows_promptless_automation_pairing_upgrade: $allows_promptless_automation_pairing_upgrade " +
+				@"allows_sharing_sensitive_info: $allows_sharing_sensitive_info " +
+				@"allows_incoming_tunnel_connections: $allows_incoming_tunnel_connections " +
+				"}";
 		}
 	}
 
@@ -2069,10 +2127,14 @@ namespace Frida.Fruity {
 				if (body_available < body_size)
 					return;
 
-				var body = new uint8[body_size + 1];
-				Memory.copy (body, data + 10, body_size);
+				var raw_json = new uint8[body_size + 1];
+				Memory.copy (raw_json, data + 10, body_size);
 
-				on_control_stream_response ((string) body);
+				unowned string json = (string) raw_json;
+				if (!json.validate ())
+					throw new Error.PROTOCOL ("Invalid UTF-8");
+
+				on_control_stream_response (json);
 
 				consumed = 10 + body_size;
 			} catch (Error e) {
@@ -4582,6 +4644,128 @@ namespace Frida.Fruity {
 			}
 
 			return new Bytes (json.data);
+		}
+	}
+
+	public class JsonObjectReader : Object, ObjectReader {
+		private Json.Reader reader;
+
+		public JsonObjectReader (string json) throws Error {
+			try {
+				reader = new Json.Reader (Json.from_string (json));
+			} catch (GLib.Error e) {
+				throw new Error.INVALID_ARGUMENT ("%s", e.message);
+			}
+		}
+
+		public bool has_member (string name) throws Error {
+			bool result = reader.read_member (name);
+			reader.end_member ();
+			return result;
+		}
+
+		public unowned ObjectReader read_member (string name) throws Error {
+			if (!reader.read_member (name))
+				throw_dict_access_error ();
+			return this;
+		}
+
+		public unowned ObjectReader end_member () {
+			reader.end_member ();
+			return this;
+		}
+
+		[NoReturn]
+		private void throw_dict_access_error () throws Error {
+			GLib.Error e = reader.get_error ();
+			reader.end_member ();
+			throw new Error.PROTOCOL ("%s", e.message);
+		}
+
+		public uint count_elements () throws Error {
+			int n = reader.count_elements ();
+			if (n == -1)
+				throw_array_access_error ();
+			return n;
+		}
+
+		public unowned ObjectReader read_element (uint index) throws Error {
+			if (!reader.read_element (index)) {
+				GLib.Error e = reader.get_error ();
+				reader.end_element ();
+				throw new Error.PROTOCOL ("%s", e.message);
+			}
+			return this;
+		}
+
+		public unowned ObjectReader end_element () throws Error {
+			reader.end_element ();
+			return this;
+		}
+
+		[NoReturn]
+		private void throw_array_access_error () throws Error {
+			GLib.Error e = reader.get_error ();
+			reader.end_element ();
+			throw new Error.PROTOCOL ("%s", e.message);
+		}
+
+		public bool get_bool_value () throws Error {
+			bool v = reader.get_boolean_value ();
+			if (!v)
+				maybe_throw_value_access_error ();
+			return v;
+		}
+
+		public uint8 get_uint8_value () throws Error {
+			int64 v = get_int64_value ();
+			if (v < 0 || v > uint8.MAX)
+				throw new Error.PROTOCOL ("Invalid uint8");
+			return (uint8) v;
+		}
+
+		public uint16 get_uint16_value () throws Error {
+			int64 v = get_int64_value ();
+			if (v < 0 || v > uint16.MAX)
+				throw new Error.PROTOCOL ("Invalid uint16");
+			return (uint16) v;
+		}
+
+		public int64 get_int64_value () throws Error {
+			int64 v = reader.get_int_value ();
+			if (v == 0)
+				maybe_throw_value_access_error ();
+			return v;
+		}
+
+		public uint64 get_uint64_value () throws Error {
+			int64 v = get_int64_value ();
+			if (v < 0)
+				throw new Error.PROTOCOL ("Invalid uint64");
+			return v;
+		}
+
+		public Bytes get_data_value () throws Error {
+			return new Bytes (Base64.decode (get_string_value ()));
+		}
+
+		public unowned string get_string_value () throws Error {
+			unowned string? v = reader.get_string_value ();
+			if (v == null)
+				maybe_throw_value_access_error ();
+			return v;
+		}
+
+		public unowned string get_uuid_value () throws Error {
+			return get_string_value ();
+		}
+
+		private void maybe_throw_value_access_error () throws Error {
+			GLib.Error? e = reader.get_error ();
+			if (e == null)
+				return;
+			reader.end_member ();
+			throw new Error.PROTOCOL ("%s", e.message);
 		}
 	}
 

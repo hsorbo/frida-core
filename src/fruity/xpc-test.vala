@@ -19,7 +19,7 @@ namespace Frida.Fruity.XPC {
 	private async void test_wifi_xpc () {
 		try {
 			var client = new SocketClient ();
-			var connection = yield client.connect_async (new InetSocketAddress.from_string ("192.168.1.124", 49152), cancellable);
+			var connection = yield client.connect_async (new InetSocketAddress.from_string ("192.168.1.115", 49152), cancellable);
 			var pairing_transport = new PlainPairingTransport (connection);
 			var pairing_service = yield PairingService.open (pairing_transport, cancellable);
 		} catch (GLib.Error e) {
