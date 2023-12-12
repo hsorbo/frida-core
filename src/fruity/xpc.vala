@@ -250,7 +250,7 @@ namespace Frida.Fruity {
 			transport.cancel ();
 		}
 
-		public async TunnelConnection establish (string device_address, Cancellable? cancellable = null) throws Error, IOError {
+		public async TunnelConnection open_tunnel (string device_address, Cancellable? cancellable = null) throws Error, IOError {
 			Key local_keypair = make_keypair (RSA);
 
 			string request = Json.to_string (
@@ -401,6 +401,7 @@ namespace Frida.Fruity {
 
 		private async Bytes? verify_manual_pairing (Cancellable? cancellable) throws Error, IOError {
 			Key host_keypair = make_keypair (X25519);
+			uint8[] raw_host_pubkey = get_raw_public_key (host_keypair).get_data ();
 
 			Bytes start_params = new PairingParamsBuilder ()
 				.add_state (1)
@@ -420,6 +421,7 @@ namespace Frida.Fruity {
 
 			var start_response = yield request_pairing_data (start_payload, cancellable);
 			uint8[] raw_device_pubkey = start_response.read_member ("public-key").get_data_value ().get_data ();
+			start_response.end_member ();
 			var device_pubkey = new Key.from_raw_public_key (X25519, null, raw_device_pubkey);
 
 			Bytes shared_key = derive_shared_key (host_keypair, device_pubkey);
@@ -430,11 +432,16 @@ namespace Frida.Fruity {
 
 			var cipher = new ChaCha20Poly1305 (operation_key);
 
+			var start_inner_response = new VariantReader (PairingParamsParser.parse (cipher.decrypt (
+				new Bytes.static ("\x00\x00\x00\x00PV-Msg02".data[:12]),
+				start_response.read_member ("encrypted-data").get_data_value ()).get_data ()));
+			printerr ("inner response: %s\n", variant_to_pretty_string (start_inner_response.root_object));
+
 			var message = new ByteArray.sized (100);
-			message.append (get_raw_public_key (host_keypair).get_data ());
+			message.append (raw_host_pubkey);
 			message.append (host_identifier.data);
 			message.append (raw_device_pubkey);
-			Bytes signature = compute_message_signature (new Bytes.static (message.data), pair_record_key);
+			Bytes signature = compute_message_signature (ByteArray.free_to_bytes ((owned) message), pair_record_key);
 
 			Bytes inner_params = new PairingParamsBuilder ()
 				.add_identifier (host_identifier)
@@ -561,7 +568,7 @@ namespace Frida.Fruity {
 			message.append (signing_key.get_data ());
 			message.append (host_identifier.data);
 			message.append (new_pair_record_pubkey.get_data ());
-			Bytes signature = compute_message_signature (new Bytes.static (message.data), new_pair_record_key);
+			Bytes signature = compute_message_signature (ByteArray.free_to_bytes ((owned) message), new_pair_record_key);
 
 			Bytes info = new OpackBuilder ()
 				.begin_dictionary ()
@@ -1272,8 +1279,6 @@ namespace Frida.Fruity {
 
 				reader.read_member ("value");
 
-				printerr ("<<< %s\n", variant_to_pretty_string (reader.current_object));
-
 				message (reader);
 			} catch (Error e) {
 			}
@@ -1577,9 +1582,11 @@ namespace Frida.Fruity {
 						val = new Variant.uint16 (delay);
 						break;
 					}
-					default:
-						val = Variant.new_from_data (byte_array, val_bytes.get_data (), true, val_bytes);
+					default: {
+						var val_bytes_copy = new Bytes (val_bytes.get_data ());
+						val = Variant.new_from_data (byte_array, val_bytes_copy.get_data (), true, val_bytes_copy);
 						break;
+					}
 				}
 
 				Variant? existing_val = parameters[key];
@@ -3783,8 +3790,6 @@ namespace Frida.Fruity {
 				if (msg == null)
 					return 0;
 				incoming_message.remove_range (0, (uint) size);
-
-				// printerr ("\n<<< [stream_id=%d] %s\n", id, msg.to_string ());
 
 				switch (msg.type) {
 					case HEADER:

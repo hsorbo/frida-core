@@ -18,10 +18,36 @@ namespace Frida.Fruity.XPC {
 
 	private async void test_wifi_xpc () {
 		try {
+			string device_address = "fdc1:9325:7cb8:4511:49:2e2e:99e8:aa72";
+
+			var pairing_service_address = new InetSocketAddress.from_string (device_address, 49152);
+
 			var client = new SocketClient ();
-			var connection = yield client.connect_async (new InetSocketAddress.from_string ("192.168.1.115", 49152), cancellable);
-			var pairing_transport = new PlainPairingTransport (connection);
-			var pairing_service = yield PairingService.open (pairing_transport, cancellable);
+			var connection = yield client.connect_async (pairing_service_address, cancellable);
+			var pairing_service = yield PairingService.open (new PlainPairingTransport (connection), cancellable);
+
+			TunnelConnection tunnel = yield pairing_service.open_tunnel (device_address, cancellable);
+
+			var disco = yield DiscoveryService.open (
+				yield tunnel.open_connection (tunnel.remote_rsd_port, cancellable),
+				cancellable);
+
+			var app_service = yield AppService.open (
+				yield tunnel.open_connection (disco.get_service ("com.apple.coredevice.appservice").port, cancellable),
+				cancellable);
+
+			printerr ("=== Applications\n");
+			foreach (AppService.ApplicationInfo app in yield app_service.enumerate_applications ()) {
+				printerr ("%s\n", app.to_string ());
+			}
+
+			printerr ("\n=== Processes\n");
+			foreach (AppService.ProcessInfo p in yield app_service.enumerate_processes ()) {
+				printerr ("%s\n", p.to_string ());
+			}
+
+			printerr ("\n\n=== Yay. Sleeping indefinitely.\n");
+			yield;
 		} catch (GLib.Error e) {
 			printerr ("Oh noes: %s\n", e.message);
 		}
@@ -80,7 +106,7 @@ namespace Frida.Fruity.XPC {
 
 			var pairing_service = yield PairingService.open (pairing_transport, cancellable);
 
-			TunnelConnection tunnel = yield pairing_service.establish (device.address, cancellable);
+			TunnelConnection tunnel = yield pairing_service.open_tunnel (device.address, cancellable);
 
 			var disco = yield DiscoveryService.open (
 				yield tunnel.open_connection (tunnel.remote_rsd_port, cancellable),
