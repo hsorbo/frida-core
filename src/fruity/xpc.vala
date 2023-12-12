@@ -432,10 +432,10 @@ namespace Frida.Fruity {
 
 			var cipher = new ChaCha20Poly1305 (operation_key);
 
+			// TODO: Verify signature using peer's public key
 			var start_inner_response = new VariantReader (PairingParamsParser.parse (cipher.decrypt (
 				new Bytes.static ("\x00\x00\x00\x00PV-Msg02".data[:12]),
 				start_response.read_member ("encrypted-data").get_data_value ()).get_data ()));
-			printerr ("inner response: %s\n", variant_to_pretty_string (start_inner_response.root_object));
 
 			var message = new ByteArray.sized (100);
 			message.append (raw_host_pubkey);
@@ -2169,9 +2169,7 @@ namespace Frida.Fruity {
 
 				unowned uint8[] data = rx_buf[:n];
 
-				int res = connection.read_packet (path, null, data, make_timestamp ());
-				if (res != 0)
-					printerr ("read_packet() failed: %s\n", NGTcp2.strerror (res));
+				connection.read_packet (path, null, data, make_timestamp ());
 			} catch (GLib.Error e) {
 				return Source.REMOVE;
 			} finally {
@@ -2236,15 +2234,12 @@ namespace Frida.Fruity {
 					break;
 				if (n == NGTcp2.ErrorCode.WRITE_MORE)
 					continue;
-				if (n < 0) {
-					printerr ("do_process_pending_writes() TODO: handle error %s\n", NGTcp2.strerror ((int) n));
+				if (n < 0)
 					break;
-				}
 
 				try {
 					socket.send (tx_buf[:n], io_cancellable);
 				} catch (GLib.Error e) {
-					printerr ("do_process_pending_writes() send() failed: %s\n", e.message);
 					continue;
 				}
 			}
@@ -2276,10 +2271,8 @@ namespace Frida.Fruity {
 
 		private bool on_expiry () {
 			int res = connection.handle_expiry (make_timestamp ());
-			if (res != 0) {
-				printerr ("handle_expiry() failed: %s\n", NGTcp2.strerror (res));
+			if (res != 0)
 				return Source.REMOVE;
-			}
 
 			process_pending_writes ();
 
@@ -2311,8 +2304,6 @@ namespace Frida.Fruity {
 		}
 
 		private int on_stream_close (uint32 flags, int64 stream_id, uint64 app_error_code) {
-			printerr (@"on_stream_close() flags=$flags stream_id=$stream_id app_error_code=$app_error_code\n");
-
 			return 0;
 		}
 
@@ -3374,8 +3365,6 @@ namespace Frida.Fruity {
 				.add_body (body)
 				.build ();
 
-			// printerr ("\n>>> %s\n", XpcMessage.parse (raw_request.get_data ()).to_string ());
-
 			bool waiting = false;
 
 			var pending = new PendingResponse (() => {
@@ -3461,8 +3450,6 @@ namespace Frida.Fruity {
 				.add_id (make_message_id ())
 				.add_body (body)
 				.build ();
-
-			// printerr ("\n>>> %s\n", XpcMessage.parse (raw_request.get_data ()).to_string ());
 
 			yield root_stream.submit_data (raw_request, cancellable);
 		}
@@ -3605,7 +3592,6 @@ namespace Frida.Fruity {
 		}
 
 		private int on_stream_close (int32 stream_id, uint32 error_code) {
-			printerr ("on_stream_close() stream_id=%d error_code=%u\n", stream_id, error_code);
 			io_cancellable.cancel ();
 			return 0;
 		}
@@ -3784,7 +3770,6 @@ namespace Frida.Fruity {
 				try {
 					msg = XpcMessage.try_parse (incoming_message.data, out size);
 				} catch (Error e) {
-					printerr ("Failed to parse message: %s\n", e.message);
 					return -1;
 				}
 				if (msg == null)
