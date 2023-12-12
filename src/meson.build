@@ -500,7 +500,10 @@ if have_fruity_backend
   endif
 
   if host_os_family == 'darwin'
-    backend_sources += 'fruity/xpc-darwin.vala'
+    backend_sources += [
+      'fruity/xpc-darwin.vala',
+      'fruity/xpc-darwin-glue.c',
+    ]
   elif host_os_family == 'linux'
     backend_sources += 'fruity/xpc-linux.vala'
   endif

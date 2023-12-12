@@ -4,9 +4,27 @@ namespace Frida.Fruity {
 	using Darwin.GCD;
 	using Darwin.Net;
 
+	public class DarwinDeviceMonitor : Object {
+		private DispatchQueue dispatch_queue = new DispatchQueue ("re.frida.fruity.monitor-queue", DispatchQueueAttr.SERIAL);
+
+		construct {
+			var conn = Darwin.XPC.Connection.create ("com.apple.CoreDevice.CoreDeviceService", dispatch_queue);
+			printerr ("Yay, created connection %p\n", conn);
+			conn.set_event_handler (e => {
+				printerr ("Got event: %s\n", e.to_string ());
+			});
+			conn.activate (); // FIXME: Requires 10.12, but we still support >= 10.9
+
+			printerr ("Sleeping forever...\n");
+			while (true) {
+				Thread.usleep (1000000);
+			}
+		}
+	}
+
 	public class DarwinPairingBrowser : Object, PairingBrowser {
 		private MainContext main_context;
-		private DispatchQueue dispatch_queue = new DispatchQueue ("re.frida.fruity.queue", DispatchQueueAttr.SERIAL);
+		private DispatchQueue dispatch_queue = new DispatchQueue ("re.frida.fruity.browser-queue", DispatchQueueAttr.SERIAL);
 
 		private DNSService dns_connection;
 		private DNSService browse_session;

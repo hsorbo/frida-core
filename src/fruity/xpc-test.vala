@@ -8,12 +8,17 @@ namespace Frida.Fruity.XPC {
 		Frida.init_with_runtime (GLIB);
 
 		var loop = new MainLoop (Frida.get_main_context ());
-		test_wifi_xpc.begin ();
+		test_darwin_device_monitor.begin ();
+		//test_wifi_xpc.begin ();
 		//test_indirect_xpc.begin ();
 		//test_direct_xpc.begin ();
 		loop.run ();
 
 		return 0;
+	}
+
+	private async void test_darwin_device_monitor () {
+		var monitor = new DarwinDeviceMonitor ();
 	}
 
 	private async void test_wifi_xpc () {

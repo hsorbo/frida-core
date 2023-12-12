@@ -12,6 +12,11 @@ base_sources = [
 ]
 
 extra_vala_args = []
+
+if host_os_family == 'darwin'
+  base_sources += 'frida-xpc.c'
+endif
+
 extra_deps = []
 if host_os_family != 'windows'
   extra_vala_args += '--pkg=gio-unix-2.0'
