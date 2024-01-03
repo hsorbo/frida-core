@@ -11,6 +11,10 @@ base_sources = [
   'buffer.vala',
 ]
 
+if host_os_family == 'darwin'
+  base_sources += 'frida-xpc.c'
+endif
+
 extra_deps = []
 if host_os_family != 'windows'
   extra_deps += [gio_unix_dep]

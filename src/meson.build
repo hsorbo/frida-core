@@ -496,13 +496,17 @@ else
   fruity_sources += 'fruity/fruity-host-session-unix.c'
 endif
 if host_os_family == 'darwin'
-  fruity_sources += 'fruity/xpc-darwin.vala'
+  fruity_sources += [
+    'fruity/xpc-darwin.vala',
+    'fruity/xpc-darwin-glue.c',
+  ]
 elif host_os_family == 'linux'
   fruity_sources += 'fruity/xpc-linux.vala'
 endif
 backend_vala_args += '--pkg=openssl'
 if host_os_family == 'darwin'
   backend_vala_args += [
+    '--pkg=darwin-xpc',
     '--pkg=darwin-gcd',
     '--pkg=darwin-dns-sd',
     '--pkg=darwin-net',
