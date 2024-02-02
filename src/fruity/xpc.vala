@@ -2783,7 +2783,7 @@ namespace Frida.Fruity {
 					events = new_events;
 
 					foreach (var entry in sources.entries) {
-						Source source = entry.key;
+						unowned Source source = entry.key;
 						IOCondition c = entry.value;
 						if ((new_events & c) != 0)
 							source.set_ready_time (0);
