@@ -329,7 +329,7 @@ if host_os_family == 'darwin'
   backend_libs_private += ['-Wl,-framework,Foundation', '-lbsm']
 endif
 if host_os == 'macos'
-  backend_libs_private += ['-Wl,-framework,AppKit']
+  backend_libs_private += ['-Wl,-framework,AppKit', '-Wl,-framework,IOKit']
 endif
 if host_os in ['ios', 'tvos']
   backend_libs_private += ['-Wl,-framework,CoreGraphics', '-Wl,-framework,UIKit']

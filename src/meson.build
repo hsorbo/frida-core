@@ -507,6 +507,8 @@ backend_vala_args += '--pkg=openssl'
 if host_os_family == 'darwin'
   backend_vala_args += [
     '--pkg=darwin-xpc',
+    '--pkg=corefoundation',
+    '--pkg=darwin-iokit',
     '--pkg=darwin-gcd',
     '--pkg=darwin-dns-sd',
     '--pkg=darwin-net',
