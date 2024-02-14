@@ -5,6 +5,7 @@ namespace Frida.Fruity {
 	using Darwin.GCD;
 	using Darwin.Net;
 	using Darwin.IOKit;
+	using Darwin.Xnu;
 
 	public class DarwinDeviceMonitor : Object {
 		private DispatchQueue dispatch_queue = new DispatchQueue ("re.frida.fruity.monitor-queue", DispatchQueueAttr.SERIAL);
@@ -314,57 +315,34 @@ namespace Frida.Fruity {
 					complete (addresses, null);
 			}
 		}
-
 		
 	}
+
 	public class UdidResolver : Object {
-		private string? climb(IORegistryEntry service) {
-			IORegistryEntry parent;
-			var result = service.parent("IOService"/*kIOServicePlane*/, out parent);
-			if(result != KernReturn.SUCCESS) {
-				print (@"$(mach_error_string(result))\n");
-				return null;
+		private string? find_idevice (IORegistryEntry service) throws GLib.IOError {
+			if (service.get_string_property ("CFBundleIdentifier") == "com.apple.driver.usb.cdc.ncm") {
+				return find_idevice (service.parent (IOKit.IOSERVICE_PLANE));
 			}
-			
-			if(parent.get_string_property("CFBundleIdentifier") == "com.apple.driver.usb.cdc.ncm"){
-				return climb(parent);
-			}
-			return parent.get_string_property("USB Serial Number");
+			var props = service.get_properties ();
+			var prod = props.get_string_value ("USB Product Name");
+			if (prod != "iPhone" && prod != "iPad") return null;
+			return props.get_string_value ("USB Serial Number");
 		}
 	
-		public string? get_serial(string ifname) {
-			MachPort masterPort;    
-			var result = IOKit.main_port(MachPort.NULL, out masterPort);
-			if(result != KernReturn.SUCCESS) {
-				print (@"$(mach_error_string(result))\n");
+		public string? get_serial (string ifname) throws GLib.IOError {
+			MutableDictionary matching_dict = IOKit.service_matching (IOKit.ETHERNET_INTERFACE_CLASS);
+			if (matching_dict == null) {
 				return null;
 			}
-	
-			var dict = IOKit.service_matching(IOKit.kIOEthernetInterfaceClass);
-			if(dict == null) {
-				print (@"dict is null\n");
-				return null;
-			}
-			dict.add(String.from_string(IOKit.kIOBSDNameKey), String.from_string(ifname));
-			IoIterator iterator;
-			result = IOKit.matching_services(masterPort, dict, out iterator);
-			if(result != KernReturn.SUCCESS) {
-				print (@"$(mach_error_string(result))\n");
-				return null;
-			}
-	
-			var service = (IORegistryEntry)iterator.next();
-			while(service != IOObject.NULL){
-				MutableDictionary dic2;
-				if(service.create_properties(out dic2, null, 0) != KernReturn.SUCCESS) {
-					continue;
-				}
-				
-				var usb_serial = climb(service);
-				if(usb_serial != null) {
+			matching_dict.add (String.from_string (IOKit.BSD_NAME_KEY), String.from_string (ifname));
+			var matches = IOKit.matching_services (IOKit.main_port (MachPort.NULL), matching_dict);
+			var service = (IORegistryEntry)matches.next ();
+			while(service != IOObject.NULL) {
+				var usb_serial = find_idevice (service.parent (IOKit.IOSERVICE_PLANE));
+				if (usb_serial != null) {
 					return usb_serial;
 				}
-				service = (IORegistryEntry)iterator.next();
+				service = (IORegistryEntry)matches.next ();
 			}
 			return null;
 		}

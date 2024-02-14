@@ -1,22 +1,34 @@
 [CCode (cheader_filename = "CoreFoundation/CFDictionary.h", gir_namespace = "Darwin", gir_version = "1.0")]
 namespace CoreFoundation {
 
-	//typedef const void *CFTypeRef;
 	[Compact]
-	[CCode (cname = "const void", ref_function ="CFRetain", unref_function = "CFRelease")]
-	public class Type {
-		[CCode (cname = "CFShow")]
-		public void show(void *obj);
+	[CCode (cname = "struct __CFDictionary", ref_function = "CFRetain", unref_function = "CFRelease")]
+	public class MutableDictionary : Dictionary {
+		[CCode (cname = "CFDictionaryAddValue")]
+		public void add(void *key, void *value);
+		
+		[CCode (cname = "CFDictionaryRemoveAllValues")]
+		public void clear();
 
-		[CCode (cname = "CFCopyDescription")]
-		public String description();
-
-		public string to_string() {
-			return description().to_string();
-		}
+		[CCode (cname = "CFDictionaryRemoveValue")]
+		public void remove(void *key);
 	}
 
-	[CCode (cname = "CFStringEncoding",  cprefix = "kCFStringEncoding", has_type_id = false)]
+	[Compact] 
+	[CCode (cname = "struct __CFDictionary", ref_function ="CFRetain", unref_function = "CFRelease")]
+	public class Dictionary : Type {
+		[CCode (cname = "CFDictionaryGetCount")]
+		public Index count();
+		
+		[CCode (cname = "CFDictionaryGetValue")]
+		public void * @get(void *key);
+
+		public string get_string_value(string key) {
+			return ((String)@get(String.from_string(key))).to_string();
+		}
+	}
+	
+	[CCode (cname = "CFStringEncoding", cprefix = "kCFStringEncoding", has_type_id = false)]
 	public enum StringEncoding {
 		MacRoman,
 		WindowsLatin1,
@@ -32,25 +44,6 @@ namespace CoreFoundation {
 		UTF32,
 		UTF32BE,
 		UTF32LE,
-	}
-
-	[Compact]
-	[CCode (cname = "CFAllocatorRef")]
-	public class Allocator {
-		[CCode (cname = "CFAllocatorGetDefault")]
-		public static Allocator get_default();
-		
-		[CCode (cname = "CFAllocatorAllocate")]
-		//public void * alloc(Index size, CFOptionFlags hint);
-		public void* alloc(Index size, long hint);
-
-		//https://developer.apple.com/documentation/corefoundation/cfallocator/predefined_allocators?language=objc
-		//[CCode (cname = "kCFAllocatorDefault")]
-		//public const Allocator DEFAULT;
-	}
-
-	[CCode (cname = "CFIndex", has_type_id = false)]
-	public struct Index : long {
 	}
 
 	//TODO: inherit CFTypeRef? CFStringRef vs __CFString
@@ -84,26 +77,35 @@ namespace CoreFoundation {
 		}
 	}
 
-	//TODO: cname CFDictionaryRef?
-	[Compact] 
-	[CCode (cname = "struct __CFDictionary", ref_function ="CFRetain",  unref_function = "CFRelease")]
-	public class Dictionary : Type {
-		[CCode (cname = "CFDictionaryGetCount")]
-		public Index count();
+	[Compact]
+	[CCode (cname = "CFAllocatorRef")]
+	public class Allocator {
+		[CCode (cname = "CFAllocatorGetDefault")]
+		public static Allocator get_default();
+		
+		[CCode (cname = "CFAllocatorAllocate")]
+		public void* alloc(Index size, long hint); //CFOptionFlags hint);
+
+		//[CCode (cname = "kCFAllocatorDefault")]
+		//public const Allocator DEFAULT;
 	}
 
+	[CCode (cname = "CFIndex", has_type_id = false)]
+	public struct Index : long {
+	}
 
-	//TODO: cname CFMutableDictionaryRef?
+	//typedef const void *CFTypeRef;
 	[Compact]
-	[CCode (cname = "struct __CFDictionary", ref_function = "CFRetain", unref_function = "CFRelease")]
-	public class MutableDictionary : Dictionary {
-		[CCode (cname = "CFDictionaryAddValue")]
-		public void add(void *key, void *value);
-		
-		[CCode (cname = "CFDictionaryRemoveAllValues")]
-		public void clear();
+	[CCode (cname = "const void", ref_function ="CFRetain", unref_function = "CFRelease")]
+	public class Type {
+		[CCode (cname = "CFShow")]
+		public void show ();
 
-		[CCode (cname = "CFDictionaryRemoveValue")]
-		public void remove(void *key);
+		[CCode (cname = "CFCopyDescription")]
+		public String description ();
+
+		public string to_string () {
+			return description().to_string();
+		}
 	}
 }
