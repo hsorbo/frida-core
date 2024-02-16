@@ -318,7 +318,7 @@ namespace Frida.Fruity {
 		
 	}
 
-	public class UdidResolver : Object {
+	public class DarwinFruitFinder : Object, FruitFinder {
 		private string? find_idevice (IORegistryEntry service) throws GLib.IOError {
 			if (service.get_string_property ("CFBundleIdentifier") == "com.apple.driver.usb.cdc.ncm") {
 				return find_idevice (service.parent (IOKit.IOSERVICE_PLANE));
@@ -329,7 +329,7 @@ namespace Frida.Fruity {
 			return props.get_string_value ("USB Serial Number");
 		}
 	
-		public string? get_serial (string ifname) throws GLib.IOError {
+		public string? udid_from_iface (string ifname) throws GLib.IOError {
 			MutableDictionary matching_dict = IOKit.service_matching (IOKit.ETHERNET_INTERFACE_CLASS);
 			if (matching_dict == null) {
 				return null;

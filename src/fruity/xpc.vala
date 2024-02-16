@@ -6,6 +6,25 @@ namespace Frida.Fruity {
 	private const string PAIRING_REGTYPE = "_remoted._tcp";
 	private const string PAIRING_DOMAIN = "local.";
 
+	
+	public interface FruitFinder : Object {
+		public static FruitFinder make_default () {
+#if DARWIN
+			return new DarwinFruitFinder ();
+#else
+			return new NullFruitFinder ();
+#endif
+		}
+		public abstract string? udid_from_iface (string ifname) throws IOError;
+	}
+
+	public class NullFruitFinder : Object, FruitFinder {
+		public string? udid_from_iface (string ifname) {
+			return null;
+		}
+	}
+
+
 	public interface PairingBrowser : Object {
 		public static PairingBrowser make_default () {
 #if DARWIN
@@ -200,12 +219,12 @@ namespace Frida.Fruity {
 			transport.close.connect (on_close);
 			transport.message.connect (on_message);
 
-#if DARWIN
-			config_file = File.new_for_path ("/var/db/lockdown/RemotePairing/user_%u/selfIdentity.plist".printf (
-				(uint) Posix.getuid ()));
-#else
+//  #if DARWIN
+//  			config_file = File.new_for_path ("/var/db/lockdown/RemotePairing/user_%u/selfIdentity.plist".printf (
+//  				(uint) Posix.getuid ()));
+//  #else
 			config_file = File.new_build_filename (Environment.get_user_config_dir (), "frida", "remote-xpc.plist");
-#endif
+//#endif
 
 			Bytes? key = null;
 			try {
