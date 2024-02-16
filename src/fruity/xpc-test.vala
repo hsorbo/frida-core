@@ -5,14 +5,17 @@ namespace Frida.Fruity.XPC {
 	private Cancellable? cancellable = null;
 
 	private int main (string[] args) {
-		Frida.init_with_runtime (GLIB);
+		var x = FruitFinder.make_default ();
+		print(@"serial: $(x.udid_from_iface("en15") ?? "NOO")\n");
 
-		var loop = new MainLoop (Frida.get_main_context ());
-		test_darwin_device_monitor.begin ();
-		//test_wifi_xpc.begin ();
-		//test_indirect_xpc.begin ();
-		//test_direct_xpc.begin ();
-		loop.run ();
+		//  Frida.init_with_runtime (GLIB);
+
+		//  var loop = new MainLoop (Frida.get_main_context ());
+		//  test_darwin_device_monitor.begin ();
+		//  //test_wifi_xpc.begin ();
+		//  //test_indirect_xpc.begin ();
+		//  //test_direct_xpc.begin ();
+		//  loop.run ();
 
 		return 0;
 	}

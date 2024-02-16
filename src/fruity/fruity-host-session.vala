@@ -305,8 +305,138 @@ namespace Frida {
 		private void on_agent_session_detached (AgentSessionId id, SessionDetachReason reason, CrashInfo crash) {
 			agent_session_detached (id, reason, crash);
 		}
+		private string socket_address_to_string (SocketAddress addr) {
+			var native_size = addr.get_native_size ();
+			var native = new uint8[native_size];
+			try {
+				addr.to_native (native, native_size);
+			} catch (GLib.Error e) {
+				assert_not_reached ();
+			}
+
+			var desc = new StringBuilder.sized (32);
+			for (uint j = 0; j != 16; j += 2) {
+				if (desc.len != 0)
+					desc.append_c (':');
+				uint8 b1 = native[8 + j];
+				uint8 b2 = native[8 + j + 1];
+				desc.append_printf ("%02x%02x", b1, b2);
+			}
+
+			//var scope_id = (uint32 *) ((uint8 *) native + 8 + 16);
+
+			return desc.str;
+		}
+
+		private class DDevice {
+			public string address;
+			public Fruity.DiscoveryService disco;
+
+			public async SocketConnection open_service (string service_name, Cancellable? cancellable) throws Error, IOError {
+				SocketConnection connection;
+				try {
+					Fruity.ServiceInfo service_info = disco.get_service (service_name);
+					NetworkAddress service_address = NetworkAddress.parse (address, service_info.port);
+					var client = new SocketClient ();
+					connection = yield client.connect_async (service_address, cancellable);
+				} catch (GLib.Error e) {
+					throw new Error.TRANSPORT ("%s", e.message);
+				}
+
+				Tcp.enable_nodelay (connection.socket);
+
+				return connection;
+			}
+		}
+
+		private async DDevice banan(Cancellable? cancellable = null) {
+			var browser = Fruity.PairingBrowser.make_default ();
+				Fruity.PairingServiceDetails[]? services = null;
+				browser.services_discovered.connect (s => {
+					printerr ("Found %u services\n", s.length);
+					if (services == null) {
+						services = s;
+						banan.callback ();
+					}
+					//timeout
+				});
+				yield;
+				var rs = Fruity.FruitFinder.make_default ();
+							
+				foreach (Fruity.PairingServiceDetails service in services) {
+					foreach (Fruity.PairingServiceHost host in yield service.resolve (cancellable)) {
+						foreach (InetSocketAddress socket_address in yield host.resolve (cancellable)) {
+							printerr ("Trying %s\n",  host.to_string ());
+							var usb_serial = rs.udid_from_iface(service.interface_name);
+							if(usb_serial != device_details.udid.raw_value) {
+								printerr (@"Skipping device with id: $(usb_serial ?? "N/A")\n");
+								continue;
+							}
+							
+							string candidate_address = socket_address_to_string (socket_address) + "%" + service.interface_name;
+							//  printerr ("Trying %s -> %s\n", service.to_string (), host.to_string ());
+							//  printerr ("\t(i.e., candidate_address: %s)\n", candidate_address);
+							InetSocketAddress? disco_address = new InetSocketAddress.from_string (candidate_address, 58783);
+							if (disco_address == null) {
+								continue;
+							}
+		
+							SocketConnection connection;
+							try {
+								var client = new SocketClient ();
+								connection = yield client.connect_async (disco_address, cancellable);
+							} catch (GLib.Error e) {
+								printerr ("\tSkipping: %s\n", e.message);
+								continue;
+							}
+		
+							Tcp.enable_nodelay (connection.socket);
+		
+							try {
+								var disco = yield Frida.Fruity.DiscoveryService.open (connection, cancellable);
+		
+								printerr ("Connected* through interface %s\n", service.interface_name);
+		
+								return  new DDevice () {
+									address = candidate_address,
+									disco = disco,
+								};
+							} catch (Error e) {
+								printerr ("\tSkipping: %s\n", e.message);
+								continue;
+							}
+						}
+					}
+				}
+				return null;
+		}
 
 		public async IOStream open_channel (string address, Cancellable? cancellable = null) throws Error, IOError {
+			if (address.has_prefix ("remotexpc:")) {
+				string service_name = address.substring (10);
+				DDevice dtxdev = yield banan();
+				if (dtxdev == null) {
+					throw new Error.INVALID_ARGUMENT ("Unable to create RemoteXPC endpoint");
+				}
+				var tserv_name = "com.apple.internal.dt.coredevice.untrusted.tunnelservice";
+				var pairing_transport = new Fruity.XpcPairingTransport (
+					yield dtxdev.open_service (tserv_name, cancellable));
+
+					var pairing_service = yield Fruity.PairingService.open (pairing_transport, cancellable);
+
+				Fruity.TunnelConnection tunnel = yield pairing_service.open_tunnel (dtxdev.address, cancellable);
+
+				var disco = yield Fruity.DiscoveryService.open (
+					yield tunnel.open_connection (tunnel.remote_rsd_port, cancellable),
+					cancellable);
+				var dtservice = disco.get_service (service_name);
+				//disco.close();
+
+				var connection = yield tunnel.open_connection (dtservice.port, cancellable);
+				printerr ("Success\n");
+				//todo: close tunnel+pairing on connection.close?
+				return connection;
+			}
 			if (address.has_prefix ("tcp:")) {
 				ulong raw_port;
 				if (!ulong.try_parse (address.substring (4), out raw_port) || raw_port == 0 || raw_port > uint16.MAX)

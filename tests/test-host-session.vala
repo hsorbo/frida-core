@@ -446,116 +446,18 @@ namespace Frida.HostSessionTest {
 		namespace Manual {
 
 			private static async void full_cycle (Harness h) {
-				if (!GLib.Test.slow ()) {
-					stdout.printf ("<skipping, run in slow mode with target application running> ");
-					h.done ();
-					return;
-				}
-
 				try {
 					var device_manager = new DeviceManager ();
-
-					var device = yield device_manager.get_device_by_type (DeviceType.LOCAL);
-
+					var device = yield device_manager.get_device_by_id ("dfcb672ae74aa06a68c6157e72858a0928bb0370");
 					print ("\n\nUsing \"%s\"\n", device.name);
 
-					var process = yield device.find_process_by_name ("Twitter");
-
-					uint pid;
-					if (process != null) {
-						pid = process.pid;
-					} else {
-						var raw_pid = prompt ("Enter PID:");
-						pid = (uint) int.parse (raw_pid);
-					}
-
-					print ("Attaching to pid %u...\n", pid);
-					var session = yield device.attach (pid);
-
-					var scripts = new Gee.ArrayList<Script> ();
-					var done = false;
-
-					new Thread<bool> ("input-worker", () => {
-						while (true) {
-							print (
-								"1. Add script\n" +
-								"2. Load script\n" +
-								"3. Remove script\n" +
-								"4. Enable debugger\n" +
-								"5. Disable debugger\n"
-							);
-
-							var command = prompt (">");
-							if (command == null)
-								break;
-							var choice = int.parse (command);
-
-							switch (choice) {
-								case 1:
-									Idle.add (() => {
-										add_script.begin (scripts, session);
-										return false;
-									});
-									break;
-								case 2:
-								case 3:
-								case 4:
-								case 5: {
-									var tokens = command.split(" ");
-									if (tokens.length < 2) {
-										printerr ("Missing argument\n");
-										continue;
-									}
-
-									int64 raw_script_index;
-									if (!int64.try_parse (tokens[1], out raw_script_index)) {
-										printerr ("Invalid script index\n");
-										continue;
-									}
-									var script_index = (int) raw_script_index;
-
-									Idle.add (() => {
-										switch (choice) {
-											case 2:
-												load_script.begin (script_index, scripts);
-												break;
-											case 3:
-												remove_script.begin (script_index, scripts);
-												break;
-											case 4:
-												enable_debugger.begin (script_index,
-													scripts);
-												break;
-											case 5:
-												disable_debugger.begin (script_index,
-													scripts);
-												break;
-											default:
-												assert_not_reached ();
-										}
-										return false;
-									});
-									break;
-								}
-								default:
-									break;
-							}
-						}
-
-						print ("\n\n");
-
-						Idle.add (() => {
-							done = true;
-							return false;
-						});
-
-						return true;
-					});
-
-					while (!done)
-						yield h.process_events ();
-
+					//  var process = yield device.find_process_by_name ("Twitter");
+					//  print ("Attaching to pid %u...\n", pid);
+					var session = yield device.attach (0);
+					var channel = yield device.open_channel ("remotexpc:com.apple.instruments.dtservicehub");
 					h.done ();
+					
+
 				} catch (GLib.Error e) {
 					printerr ("\nFAIL: %s\n\n", e.message);
 					assert_not_reached ();
