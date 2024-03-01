@@ -11,6 +11,8 @@ namespace Frida.Fruity {
 		public static FruitFinder make_default () {
 #if DARWIN
 			return new DarwinFruitFinder ();
+#elif LINUX
+			return new LinuxFruitFinder ();
 #else
 			return new NullFruitFinder ();
 #endif

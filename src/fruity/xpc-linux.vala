@@ -214,4 +214,23 @@ namespace Frida.Fruity.XPC {
 		NO_TXT = 4,
 		NO_ADDRESS = 8,
 	}
+
+	public class LinuxFruitFinder : Object, FruitFinder {
+		public string? udid_from_iface (string ifname) throws GLib.IOError {
+			var net = "/sys/class/net/";
+			var directory = File.new_for_path (Path.build_filename (net, ifname));
+			if (!directory.query_exists ()) return null;
+			var info = directory.query_info ("standard::*", 0);
+			if (!info.get_is_symlink()) return null;
+			var dev_path = Path.build_filename (net, info.get_symlink_target ());
+			var iface = File.new_for_path (Path.build_filename (dev_path, "../../interface"));
+			if (!iface.query_exists ()) return null;
+			var iface_stream = new DataInputStream (iface.read ());
+			if (iface_stream.read_line () != "AppleUSBEthernet") return null;
+			var serial = File.new_for_path (Path.build_filename (dev_path, "../../../serial"));
+			if (!serial.query_exists ()) return null;
+			var serial_stream = new DataInputStream (serial.read ());
+			return serial_stream.read_line ();
+		}
+	}
 }
