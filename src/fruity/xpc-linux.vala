@@ -1,11 +1,11 @@
 [CCode (gir_namespace = "FridaFruity", gir_version = "1.0")]
-namespace Frida.Fruity.XPC {
+namespace Frida.Fruity {
 	public class LinuxPairingBrowser : Object, PairingBrowser {
 		private DBusConnection connection;
 		private AvahiServer server;
 		private AvahiServiceBrowser browser;
 
-		private Gee.List<PairingService> current_batch = new Gee.ArrayList<PairingService> ();
+		private Gee.List<PairingServiceDetails> current_batch = new Gee.ArrayList<PairingServiceDetails> ();
 
 		private Cancellable io_cancellable = new Cancellable ();
 
@@ -52,7 +52,7 @@ namespace Frida.Fruity.XPC {
 		}
 	}
 
-	private class LinuxPairingService : Object, PairingService {
+	private class PairingServiceDetails : Object, PairingServiceDetails {
 		public string name {
 			get { return _name; }
 		}
@@ -72,7 +72,7 @@ namespace Frida.Fruity.XPC {
 
 		private AvahiServer server;
 
-		internal LinuxPairingService (string name, uint interface_index, string interface_name, AvahiProtocol protocol,
+		internal PairingServiceDetails (string name, uint interface_index, string interface_name, AvahiProtocol protocol,
 				AvahiServer server) {
 			_name = name;
 			_interface_index = interface_index;

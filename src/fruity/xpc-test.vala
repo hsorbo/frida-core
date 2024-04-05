@@ -18,7 +18,9 @@ namespace Frida.Fruity.XPC {
 	}
 
 	private async void test_darwin_device_monitor () {
+		#if DARWIN
 		var monitor = new DarwinDeviceMonitor ();
+		#endif
 	}
 
 	private async void test_wifi_xpc () {
