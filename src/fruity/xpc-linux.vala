@@ -43,7 +43,7 @@ namespace Frida.Fruity {
 				type,
 				domain,
 				flags);
-			current_batch.add (new LinuxPairingService (name, interface_index, interface_name, protocol, server));
+			current_batch.add (new LinuxPairingServiceDetails (name, interface_index, interface_name, protocol, server));
 		}
 
 		private void on_all_for_now () {
@@ -52,7 +52,7 @@ namespace Frida.Fruity {
 		}
 	}
 
-	private class PairingServiceDetails : Object, PairingServiceDetails {
+	private class LinuxPairingServiceDetails : Object, PairingServiceDetails {
 		public string name {
 			get { return _name; }
 		}
@@ -72,7 +72,7 @@ namespace Frida.Fruity {
 
 		private AvahiServer server;
 
-		internal PairingServiceDetails (string name, uint interface_index, string interface_name, AvahiProtocol protocol,
+		internal LinuxPairingServiceDetails (string name, uint interface_index, string interface_name, AvahiProtocol protocol,
 				AvahiServer server) {
 			_name = name;
 			_interface_index = interface_index;
